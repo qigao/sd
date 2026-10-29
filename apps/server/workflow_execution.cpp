@@ -11,7 +11,8 @@
 namespace {
 bool matches_model_binding(const WorkflowV1& workflow, const json& status) {
     if (status.value("state", std::string()) != "ready") return false;
-    if (status.value("revision", uint64_t(0)) != workflow.model_revision) return false;
+    if (status.value("revision", uint64_t(0)) != workflow.model_revision ||
+        status.value("instance", std::string()) != workflow.model_instance) return false;
     const json recipe = status.value("recipe", json(nullptr));
     if (recipe.is_null())
         return workflow.model_recipe == "@command-line" &&
@@ -61,6 +62,17 @@ bool make_node_request(const WorkflowV1Node& node,
     return true;
 }
 } // namespace
+
+bool validate_workflow_v1_admission(ServerRuntime& runtime,
+                                    const WorkflowV1& workflow,
+                                    std::string& error) {
+    error.clear();
+    for (const auto& node : workflow.nodes) {
+        ImgGenJobRequest request;
+        if (!make_node_request(node, runtime, request, error)) return false;
+    }
+    return true;
+}
 
 bool execute_workflow_job(ServerRuntime& runtime,
                           AsyncGenerationJob& job,
@@ -121,7 +133,7 @@ bool execute_workflow_job(ServerRuntime& runtime,
         output_items.push_back({{"node_id", id}, {"images", std::move(selected.at(id))}});
     }
     result = {{"version", 1},
-              {"model", {{"recipe", workflow.model_recipe}, {"revision", workflow.model_revision}}},
+              {"model", {{"recipe", workflow.model_recipe}, {"revision", workflow.model_revision}, {"instance", workflow.model_instance}}},
               {"outputs", std::move(output_items)}};
     return true;
 }

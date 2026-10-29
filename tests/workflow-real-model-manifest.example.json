@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "model_root": "/absolute/path/to/owned/models",
+  "sha256": {
+    "checkpoints/REPLACE_WITH_REAL_MODEL.safetensors": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "load": {
+    "recipe": "REPLACE_WITH_ACTUAL_RECIPE_ID_FROM_sdcpp_v1_recipes",
+    "models": {
+      "model": "checkpoints/REPLACE_WITH_REAL_MODEL.safetensors"
+    }
+  },
+  "generation": {
+    "prompt": "a quiet mountain lake at dawn",
+    "width": 256,
+    "height": 256,
+    "steps": 4,
+    "seed": 42,
+    "cfg_scale": 7.0
+  },
+  "cancel_steps": 48
+}

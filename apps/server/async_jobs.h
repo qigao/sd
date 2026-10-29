@@ -91,3 +91,5 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
                          json& output_info,
                          std::string& error_message);
 void async_job_worker(ServerRuntime& runtime);
+// Stop admission, cancel queued jobs and request running cancellation before join.
+void stop_async_job_worker(AsyncJobManager& manager);

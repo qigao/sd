@@ -10,6 +10,7 @@
 #include "common/media_io.h"
 #include "common/resource_owners.hpp"
 #include "model_catalog.h"
+#include "workflow_http_guard.h"
 
 namespace fs = std::filesystem;
 
@@ -815,6 +816,12 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
             return;
         }
 
+        if (it->second->kind == AsyncJobKind::Workflow &&
+            !workflow_local_request_allowed(req, *runtime->svr_params)) {
+            res.status = 403;
+            res.set_content(R"({"code":"workflow_local_only","error":"direct loopback request required"})", "application/json");
+            return;
+        }
         res.status = 200;
         res.set_content(make_async_job_json(manager, *it->second).dump(), "application/json");
     });
@@ -838,6 +845,12 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
         }
 
         auto& job = *it->second;
+        if (job.kind == AsyncJobKind::Workflow &&
+            !workflow_local_request_allowed(req, *runtime->svr_params)) {
+            res.status = 403;
+            res.set_content(R"({"code":"workflow_local_only","error":"direct loopback request required"})", "application/json");
+            return;
+        }
         if (job.status == AsyncJobStatus::Queued) {
             if (!cancel_queued_job(manager, job)) {
                 res.status = 409;

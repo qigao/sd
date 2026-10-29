@@ -33,6 +33,7 @@ struct ServerModels {
     std::shared_mutex runtime_mutex;
     std::mutex catalog_mutex;
     std::mutex status_mutex;
+    std::string instance_id; // minted on each process startup; not an authentication credential
     SDCtxPtr context;
     SDContextParams base_context;
     SDGenerationParams base_defaults;

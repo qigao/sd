@@ -68,3 +68,26 @@ if(TARGET sd_app_workflow_v1)
     LABELS "workflow;no-weights" TIMEOUT 60
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_sd_app_workflow_v1>")
 endif()
+
+# A test-only fixture may point at user-provided real weights. Never download,
+# synthesize, skip or claim inference acceptance without that fixture.
+set(SD_APP_WORKFLOW_TEST_MANIFEST "" CACHE FILEPATH
+    "Local JSON manifest with pinned SHA-256 real weights for Workflow V1 qualification")
+if(TARGET sd-app-server)
+  add_test(NAME test_sd_app_workflow_qualifier_selftest
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/workflow_real_model.py"
+            --self-test)
+  set_tests_properties(test_sd_app_workflow_qualifier_selftest PROPERTIES
+    LABELS "workflow;no-weights;test-harness" TIMEOUT 30)
+  if(SD_APP_WORKFLOW_TEST_MANIFEST)
+    if(NOT EXISTS "${SD_APP_WORKFLOW_TEST_MANIFEST}")
+      message(FATAL_ERROR "SD_APP_WORKFLOW_TEST_MANIFEST must refer to a local existing JSON file")
+    endif()
+    add_test(NAME test_sd_app_workflow_real_weights
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/workflow_real_model.py"
+              "$<TARGET_FILE:sd-app-server>" "${SD_APP_WORKFLOW_TEST_MANIFEST}")
+    set_tests_properties(test_sd_app_workflow_real_weights PROPERTIES
+      LABELS "workflow;real-weights;native-inference" TIMEOUT 2400
+      WORKING_DIRECTORY "$<TARGET_FILE_DIR:sd-app-server>")
+  endif()
+endif()

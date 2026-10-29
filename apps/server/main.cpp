@@ -161,11 +161,7 @@ int main(int argc, const char** argv) {
     LOG_INFO("listening on: http://%s:%d\n", svr_params.listen_ip.c_str(), svr_params.listen_port);
     svr.listen(svr_params.listen_ip, svr_params.listen_port);
 
-    {
-        std::lock_guard<std::mutex> lock(async_job_manager.mutex);
-        async_job_manager.stop = true;
-    }
-    async_job_manager.cv.notify_all();
+    stop_async_job_worker(async_job_manager);
     async_worker.join();
     return 0;
 }

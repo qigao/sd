@@ -11,7 +11,7 @@ using json = nlohmann::json;
 static json sample() {
     return {
         {"version", 1},
-        {"model", {{"recipe", "@command-line"}, {"revision", 0}}},
+        {"model", {{"recipe", "@command-line"}, {"revision", 0}, {"instance", "0123456789abcdef0123456789abcdef"}}},
         {"nodes", json::array({
             {{"id", "second"}, {"type", "sdcpp.image.generate"},
              {"depends_on", json::array({"first"})},
@@ -67,6 +67,15 @@ spec("JSON Workflow V1 native validation and scheduler")
         check_false(parse_workflow_v1(doc, graph, error));
         doc = sample();
         doc["nodes"][0]["params"]["cfg_scale"] = "7";
+        check_false(parse_workflow_v1(doc, graph, error));
+        doc = sample();
+        doc["model"].erase("instance");
+        check_false(parse_workflow_v1(doc, graph, error));
+        doc = sample();
+        doc["model"]["instance"] = "NON_HEX";
+        check_false(parse_workflow_v1(doc, graph, error));
+        doc = sample();
+        doc["model"]["instance"] = json::object();
         check_false(parse_workflow_v1(doc, graph, error));
         doc = sample();
         doc["version"] = 2;

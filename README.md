@@ -16,11 +16,11 @@
 | `apps/server/` | 迁入的模型与任务基线，当前 `sd-app-server` 仍使用原有 httplib 路由 |
 | `vendor/stable-diffusion.cpp/` | 未修改的推理引擎，GGML 跟随其 gitlink |
 | CHttp HTTP/2、WS、认证与业务 Service | 已进行固定源码审查，接入契约和实施次序见下方设计；尚未链接进应用 |
-| JSON Workflow V1 | 原生 `/sdcpp/v1/workflows`：严格 JSON、模型修订绑定、生成 DAG、取消与有界结果；仍基于 httplib，仅 loopback 开发使用 |
+| JSON Workflow V1 | 原生 `/sdcpp/v1/workflows`：严格 JSON、模型实例+修订绑定、生成 DAG、取消与有界结果；仍基于 httplib，仅 loopback 开发使用 |
 | KFCore 节点、CatV2TON 网络 | 尚未实现；拒绝未知节点类型 |
 
 [Workflow V1 合同与测试层次](docs/workflow-v1.md) 说明已实现的本地工作流子集、控制依赖、参数范围、任务所有权与明确未实现的媒体边。  
-[CHttp 服务设计](docs/chttp-service-design.md) 明确认证、任务提交、状态、取消、产物下载、
+Workflow V1 真实权重验收可按 [本地 manifest 示例](tests/workflow-real-model-manifest.example.json)\n配置 `SD_APP_WORKFLOW_TEST_MANIFEST`。默认 CTest 不下载权重、不会把纯解析通过当成模型计算通过。\n\n[CHttp 服务设计](docs/chttp-service-design.md) 明确认证、任务提交、状态、取消、产物下载、
 WS 订阅、资源上限和共享 Service 能力缺口。文中的新接口是待实现契约，不是当前路由。
 原有 `/sdcpp/v1/*` 无模型基线测试不能证明新服务的认证或多用户隔离已完成。
 

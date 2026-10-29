@@ -6,6 +6,8 @@
 #include "async_jobs.h"
 #include "model_catalog.h"
 #include "workflow_v1.h"
+#include "workflow_execution.h"
+#include "workflow_http_guard.h"
 
 namespace {
 void workflow_error(httplib::Response& response, int status,
@@ -16,7 +18,8 @@ void workflow_error(httplib::Response& response, int status,
 
 bool model_matches(const ServerRuntime& runtime, const WorkflowV1& workflow, const json& status) {
     if (!runtime.sd_ctx || status.value("state", std::string()) != "ready") return false;
-    if (status.value("revision", uint64_t(0)) != workflow.model_revision) return false;
+    if (status.value("revision", uint64_t(0)) != workflow.model_revision ||
+        status.value("instance", std::string()) != workflow.model_instance) return false;
     const json recipe = status.value("recipe", json(nullptr));
     if (recipe.is_null())
         return workflow.model_recipe == "@command-line" &&
@@ -32,10 +35,9 @@ void register_workflow_endpoints(httplib::Server& server, ServerRuntime& runtime
     routes.post("/sdcpp/v1/workflows", [&runtime](const httplib::Request& req, httplib::Response& res) {
         // The inherited httplib baseline has no identity/tenant authorization.
         // Never advertise an unauthenticated workflow route on a wide-area bind.
-        if (runtime.svr_params->listen_ip != "127.0.0.1" &&
-            runtime.svr_params->listen_ip != "::1") {
-            workflow_error(res, 503, "workflow_loopback_only",
-                           "Workflow V1 requires loopback until CHttp authorization is implemented");
+        if (!workflow_local_request_allowed(req, *runtime.svr_params)) {
+            workflow_error(res, 403, "workflow_local_only",
+                           "Workflow V1 requires a direct native loopback request without Origin/Referer");
             return;
         }
         if (req.body.size() > k_workflow_v1_max_request_bytes) {
@@ -59,6 +61,11 @@ void register_workflow_endpoints(httplib::Server& server, ServerRuntime& runtime
             if (!runtime_supports_generation_mode(runtime, IMG_GEN)) {
                 workflow_error(res, 422, "unsupported_generation_mode",
                                unsupported_generation_mode_error(IMG_GEN));
+                return;
+            }
+
+            if (!validate_workflow_v1_admission(runtime, workflow, error)) {
+                workflow_error(res, 422, "unsupported_workflow_defaults", error);
                 return;
             }
 

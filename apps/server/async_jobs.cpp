@@ -302,8 +302,12 @@ bool execute_img_gen_job(ServerRuntime& runtime,
         JobCancellationMonitor cancellation(runtime.sd_ctx, job);
         PreviewCallbackGuard preview(job);
         sd_image_generation_result_t* generated = nullptr;
-        generate_image(runtime.sd_ctx, &params, &generated);
+        const bool generated_ok = generate_image(runtime.sd_ctx, &params, &generated);
         results.adopt(generated, runtime.ctx_params->lora_model_dir);
+        if (!generated_ok) {
+            error_message = "generate_image failed";
+            return false;
+        }
         if (job.cancel_requested.load()) {
             return false;
         }
@@ -369,7 +373,7 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
 
     SDImageVec results;
     int num_results             = 0;
-    sd_audio_t* generated_audio = nullptr;
+    std::unique_ptr<sd_audio_t, decltype(&free_sd_audio)> generated_audio(nullptr, &free_sd_audio);
 
     {
         std::lock_guard<std::mutex> lock(*runtime.sd_ctx_mutex);
@@ -379,11 +383,14 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
         JobCancellationMonitor cancellation(runtime.sd_ctx, job);
         PreviewCallbackGuard preview(job);
         sd_video_generation_result_t* generated = nullptr;
-        if (generate_video(runtime.sd_ctx, &params, &generated)) {
-            output_fps       = generated->fps;
-            generated_audio  = generated->audio;
-            generated->audio = nullptr;
-            results.adopt_video(generated, runtime.ctx_params->lora_model_dir);
+        const bool generated_ok = generate_video(runtime.sd_ctx, &params, &generated);
+        std::unique_ptr<sd_video_generation_result_t, decltype(&free_sd_video_generation_result)>
+            native_result(generated, &free_sd_video_generation_result);
+        if (generated_ok && native_result) {
+            output_fps = native_result->fps;
+            generated_audio.reset(native_result->audio);
+            native_result->audio = nullptr;
+            results.adopt_video(native_result.release(), runtime.ctx_params->lora_model_dir);
             output_info = json::parse(results.generation_info(0));
             if (job.vid_gen.gen_params.embed_image_metadata)
                 str_params = results.generation_info(0);
@@ -392,7 +399,6 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
 
     num_results = results.count();
     if (job.cancel_requested.load() || num_results <= 0) {
-        free_sd_audio(generated_audio);
         error_message = "generate_video returned no results";
         return false;
     }
@@ -402,9 +408,8 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
                                                                              num_results,
                                                                              output_fps,
                                                                              job.vid_gen.output_compression,
-                                                                             generated_audio,
+                                                                             generated_audio.get(),
                                                                              str_params);
-    free_sd_audio(generated_audio);
     if (video_bytes.empty()) {
         error_message = "failed to encode generated video container";
         return false;
@@ -519,9 +524,33 @@ void async_job_worker(ServerRuntime& runtime) {
 
             if (job->kind == AsyncJobKind::Workflow && job->status != AsyncJobStatus::Completed) {
                 for (auto& state : job->workflow_node_states)
-                    if (state == "queued" || state == "running") state = "skipped";
+                    if (state == "running") {
+                        state = job->cancel_requested.load() ? "cancelled" : "failed";
+                    } else if (state == "queued") {
+                        state = "skipped";
+                    }
             }
             purge_expired_jobs(manager);
         }
     }
+}
+
+void stop_async_job_worker(AsyncJobManager& manager) {
+    {
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        manager.stop = true;
+        // The worker must not drain newly orphaned generations during shutdown.
+        // A running callback/ctx stays alive until the worker has been joined.
+        const std::vector<std::string> queued(manager.queue.begin(), manager.queue.end());
+        for (const auto& id : queued) {
+            auto it = manager.jobs.find(id);
+            if (it != manager.jobs.end() && it->second->status == AsyncJobStatus::Queued)
+                cancel_queued_job(manager, *it->second);
+        }
+        for (const auto& entry : manager.jobs) {
+            if (entry.second->status == AsyncJobStatus::Generating)
+                entry.second->cancel_requested.store(true);
+        }
+    }
+    manager.cv.notify_all();
 }

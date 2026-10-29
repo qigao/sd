@@ -19,6 +19,7 @@ struct WorkflowV1Node {
 
 struct WorkflowV1 {
     std::string model_recipe;
+    std::string model_instance;
     uint64_t model_revision = 0;
     std::vector<WorkflowV1Node> nodes;
     std::vector<size_t> order;

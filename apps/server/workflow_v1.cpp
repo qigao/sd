@@ -95,9 +95,13 @@ bool parse_workflow_v1(const nlohmann::json& document,
                     integer(document.at("version"), 1, 1, "version") == 1,
                 "workflow version 1 is required");
         const json& model = document.at("model");
-        keys(model, {"recipe", "revision"}, "model");
+        keys(model, {"recipe", "revision", "instance"}, "model");
         WorkflowV1 parsed;
         parsed.model_recipe = required_text(model, "recipe", 128, "model");
+        parsed.model_instance = required_text(model, "instance", 64, "model");
+        require(std::all_of(parsed.model_instance.begin(), parsed.model_instance.end(), [](unsigned char c) {
+                    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                }), "model.instance must be lowercase hexadecimal");
         require(model.contains("revision"), "model.revision is required");
         parsed.model_revision = static_cast<uint64_t>(
             integer(model.at("revision"), 0, std::numeric_limits<int64_t>::max(), "model.revision"));

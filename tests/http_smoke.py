@@ -15,11 +15,12 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def request_bytes(port, method, path, body=None):
+def request_bytes(port, method, path, body=None, extra_headers=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
         encoded = None if body is None else json.dumps(body).encode("utf-8")
         headers = {} if body is None else {"Content-Type": "application/json"}
+        headers.update(extra_headers or {})
         connection.request(method, path, body=encoded, headers=headers)
         response = connection.getresponse()
         payload = response.read(4 * 1024 * 1024 + 1)
@@ -29,8 +30,8 @@ def request_bytes(port, method, path, body=None):
         connection.close()
 
 
-def request_json(port, method, path, body=None):
-    status, content_type, payload = request_bytes(port, method, path, body)
+def request_json(port, method, path, body=None, extra_headers=None):
+    status, content_type, payload = request_bytes(port, method, path, body, extra_headers)
     require(content_type.startswith("application/json"), path + " did not return JSON")
     document = json.loads(payload)
     require(isinstance(document, dict), path + " did not return a JSON object")
@@ -72,6 +73,10 @@ def exercise_server(executable):
                 require(code == 200 and status.get("state") == "empty",
                         "server must start with an empty model context")
 
+                require(isinstance(status.get("instance"), str) and len(status["instance"]) == 32,
+                        "model runtime must advertise its process instance identity")
+                instance = status["instance"]
+
                 code, content_type, html = request_bytes(port, "GET", "/")
                 require(code == 200 and content_type.startswith("text/html") and html == initial_html,
                         "the native server must serve the selected external UI file")
@@ -106,7 +111,7 @@ def exercise_server(executable):
                     # creating a model context or using fake inference weights.
                     workflow = {
                         "version": 1,
-                        "model": {"recipe": "@command-line", "revision": 0},
+                        "model": {"recipe": "@command-line", "revision": 0, "instance": instance},
                         "nodes": [{
                             "id": "generate", "type": "sdcpp.image.generate",
                             "depends_on": [],
@@ -120,6 +125,24 @@ def exercise_server(executable):
                     code, error = request_json(port, "POST", "/sdcpp/v1/workflows", invalid)
                     require(code == 400 and error.get("code") == "invalid_workflow",
                             "HTTP must reject unknown workflow parameters")
+                    invalid = json.loads(json.dumps(workflow))
+                    del invalid["model"]["instance"]
+                    code, error = request_json(port, "POST", "/sdcpp/v1/workflows", invalid)
+                    require(code == 400 and error.get("code") == "invalid_workflow",
+                            "HTTP must require a process instance identity")
+                    invalid = json.loads(json.dumps(workflow))
+                    invalid["model"]["instance"] = "NOT_HEX"
+                    code, error = request_json(port, "POST", "/sdcpp/v1/workflows", invalid)
+                    require(code == 400 and error.get("code") == "invalid_workflow",
+                            "HTTP must reject malformed model instance")
+                    code, error = request_json(port, "POST", "/sdcpp/v1/workflows",
+                                               workflow, {"Origin": "https://evil.example"})
+                    require(code == 403 and error.get("code") == "workflow_local_only",
+                            "cross-origin workflows must not be admitted on loopback")
+                    code, error = request_json(port, "POST", "/sdcpp/v1/workflows",
+                                               workflow, {"Host": "rebinding.example"})
+                    require(code == 403 and error.get("code") == "workflow_local_only",
+                            "untrusted Host must not be accepted for workflow admission")
                     code, error = request_json(port, "POST", "/sdcpp/v1/workflows", workflow)
                     require(code == 503 and error.get("code") == "model_not_loaded",
                             "valid V1 workflow must not enqueue without model weights")

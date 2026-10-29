@@ -5,6 +5,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -630,10 +631,22 @@ void refresh_model_catalog(ServerRuntime& runtime) {
     models.catalog_errors = std::move(errors);
 }
 
+static std::string new_model_runtime_instance() {
+    // Identifies the currently running native process rather than a persisted
+    // weight revision. This nonce is *not* an authorization credential.
+    std::random_device source;
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    for (int i = 0; i < 4; ++i)
+        out << std::setw(8) << static_cast<uint32_t>(source());
+    return out.str();
+}
+
 json model_status(ServerRuntime& runtime) {
     std::lock_guard<std::mutex> lock(runtime.models->status_mutex);
     auto& models = *runtime.models;
     json status  = models.status;
+    status["instance"] = models.instance_id;
     if (status["state"] == "loading" && !status["load_elapsed_seconds"].is_null()) {
         status["load_elapsed_seconds"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - models.load_started_at).count();
     }
@@ -642,6 +655,7 @@ json model_status(ServerRuntime& runtime) {
 
 void initialize_server_models(ServerRuntime& runtime) {
     auto& models        = *runtime.models;
+    models.instance_id = new_model_runtime_instance();
     models.base_context = *runtime.ctx_params;
     clear_model_paths(models.base_context);
     models.base_defaults = *runtime.default_gen_params;
