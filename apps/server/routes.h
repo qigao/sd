@@ -10,6 +10,7 @@ void register_openai_api_endpoints(httplib::Server& svr, ServerRuntime& rt);
 void register_sdapi_endpoints(httplib::Server& svr, ServerRuntime& rt);
 void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt);
 void register_model_endpoints(httplib::Server& svr, ServerRuntime& rt);
+void register_workflow_endpoints(httplib::Server& svr, ServerRuntime& rt);
 
 class RuntimeRoutes {
     httplib::Server& server_;

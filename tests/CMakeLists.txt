@@ -58,3 +58,13 @@ foreach(_prefix IN ITEMS sd sd-app)
       WORKING_DIRECTORY "$<TARGET_FILE_DIR:${_prefix}-server>")
   endif()
 endforeach()
+
+# Pure plan/scheduler tests execute without model weights, devices or HTTP.
+if(TARGET sd_app_workflow_v1)
+  add_executable(test_sd_app_workflow_v1 test_workflow_v1.cpp)
+  target_link_libraries(test_sd_app_workflow_v1 PRIVATE sd_app_workflow_v1 sd_app_test_tinytest)
+  add_test(NAME test_sd_app_workflow_v1 COMMAND test_sd_app_workflow_v1)
+  set_tests_properties(test_sd_app_workflow_v1 PROPERTIES
+    LABELS "workflow;no-weights" TIMEOUT 60
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_sd_app_workflow_v1>")
+endif()

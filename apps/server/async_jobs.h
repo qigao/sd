@@ -12,10 +12,12 @@
 
 
 #include "runtime.h"
+#include "workflow_v1.h"
 
 enum class AsyncJobKind {
     ImgGen,
     VidGen,
+    Workflow,
 };
 
 enum class AsyncJobStatus {
@@ -39,6 +41,9 @@ struct AsyncGenerationJob {
     int64_t completed_at = 0;
     ImgGenJobRequest img_gen;
     VidGenJobRequest vid_gen;
+    WorkflowV1 workflow;
+    std::vector<std::string> workflow_node_states; // protected by manager.mutex
+    json result_workflow;
     std::vector<std::string> result_images_b64;
     json result_generation_info;
     std::string result_media_b64;

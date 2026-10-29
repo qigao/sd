@@ -225,6 +225,10 @@ public:
 
     void adopt(sd_image_generation_result_t* result, const std::string& lora_model_dir = {}) {
         clear();
+        // A move/metadata allocation can throw. Always free the remaining
+        // native result while already-transferred images stay in SDImageVec.
+        std::unique_ptr<sd_image_generation_result_t, decltype(&free_sd_image_generation_result)>
+            owner(result, &free_sd_image_generation_result);
         if (!result)
             return;
         for (int i = 0; i < result->count; ++i) {
@@ -232,11 +236,12 @@ public:
             result->items[i].image = {};
             generation_infos_.push_back(generation_info_with_relative_lora_paths(result->items[i].generation_info, lora_model_dir));
         }
-        free_sd_image_generation_result(result);
     }
 
     void adopt_video(sd_video_generation_result_t* result, const std::string& lora_model_dir = {}) {
         clear();
+        std::unique_ptr<sd_video_generation_result_t, decltype(&free_sd_video_generation_result)>
+            owner(result, &free_sd_video_generation_result);
         if (!result)
             return;
         const auto info = generation_info_with_relative_lora_paths(result->generation_info, lora_model_dir);
@@ -245,7 +250,6 @@ public:
             result->frames[i] = {};
             generation_infos_.push_back(info);
         }
-        free_sd_video_generation_result(result);
     }
 
     void adopt(sd_image_t* images, int count) {

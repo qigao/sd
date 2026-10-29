@@ -101,6 +101,18 @@ SDAPI 等入口若继续提供，必须映射到同一个有界业务队列，�
 ONNX `run(inputs, outputs)` 接口。具体 schema、路由和错误码将在对应实现与行为测试
 完成后发布，本阶段不提供可提交执行的示例协议。
 
+## 原生 JSON Workflow V1 状态
+
+V1 已在本地 httplib 基线增加 `POST /sdcpp/v1/workflows`，复用现有
+模型 manager、AsyncJobManager 单 worker、sd.cpp 图像生成与取消。
+支持严格 version=1 JSON、recipe + 当前服务模型 revision 的入队绑定、
+最大四节点的生成 DAG（控制依赖）和有界输出；仅允许 loopback 开发服务。
+`depends_on` 不传递像素，暂不支持动态模型加载节点、KFCore、
+CatV2TON 或跨节点媒体输入。详见 [工作流 V1](workflow-v1.md)。
+
+这是独立于正式 CHttp HTTP/2 与鉴权服务的过渡入口；无权重的解析/HTTP
+门禁不代表任何真实权重或 GPU 计算已经通过。
+
 ## CatV2TON 与扩展模型
 
 本仓库没有实现 CatV2TON 的网络或工作流。其

@@ -11,6 +11,7 @@
 #include "common/log.h"
 #include "common/media_io.h"
 #include "common/resource_owners.hpp"
+#include "workflow_execution.h"
 
 class JobCancellationMonitor {
     std::mutex mutex_;
@@ -77,20 +78,28 @@ static void clear_preview_callback() {
 }
 
 static void set_preview_callback(AsyncGenerationJob& job) {
-    preview_t mode = str_to_preview(job.kind == AsyncJobKind::ImgGen
-                                        ? job.img_gen.preview_mode.c_str()
-                                        : job.vid_gen.preview_mode.c_str());
+    preview_t mode = str_to_preview(job.kind == AsyncJobKind::VidGen
+                                        ? job.vid_gen.preview_mode.c_str()
+                                        : job.img_gen.preview_mode.c_str());
     if (mode == PREVIEW_COUNT || mode == PREVIEW_NONE) {
         return;
     }
-    int interval = job.kind == AsyncJobKind::ImgGen
-                       ? job.img_gen.preview_interval
-                       : job.vid_gen.preview_interval;
+    int interval = job.kind == AsyncJobKind::VidGen
+                       ? job.vid_gen.preview_interval
+                       : job.img_gen.preview_interval;
     if (interval <= 0) {
         interval = 1;
     }
     sd_set_preview_callback(preview_callback, mode, interval, true, false, &job);
 }
+
+class PreviewCallbackGuard {
+public:
+    explicit PreviewCallbackGuard(AsyncGenerationJob& job) { set_preview_callback(job); }
+    ~PreviewCallbackGuard() { clear_preview_callback(); }
+    PreviewCallbackGuard(const PreviewCallbackGuard&) = delete;
+    PreviewCallbackGuard& operator=(const PreviewCallbackGuard&) = delete;
+};
 
 const char* async_job_kind_name(AsyncJobKind kind) {
     switch (kind) {
@@ -98,6 +107,8 @@ const char* async_job_kind_name(AsyncJobKind kind) {
             return "img_gen";
         case AsyncJobKind::VidGen:
             return "vid_gen";
+        case AsyncJobKind::Workflow:
+            return "workflow";
         default:
             return "img_gen";
     }
@@ -186,6 +197,8 @@ bool cancel_queued_job(AsyncJobManager& manager, AsyncGenerationJob& job) {
     job.result_fps         = 0;
     job.error_code         = "cancelled";
     job.error_message      = "job cancelled by client";
+    job.result_workflow = nullptr;
+    for (auto& state : job.workflow_node_states) state = "skipped";
     return true;
 }
 
@@ -211,8 +224,17 @@ json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJo
         }
     }
 
+    if (job.kind == AsyncJobKind::Workflow) {
+        result["nodes"] = json::array();
+        for (size_t i = 0; i < job.workflow.nodes.size(); ++i) {
+            result["nodes"].push_back({{"id", job.workflow.nodes[i].id},
+                                       {"status", job.workflow_node_states[i]}});
+        }
+    }
     if (job.status == AsyncJobStatus::Completed) {
-        if (job.kind == AsyncJobKind::VidGen) {
+        if (job.kind == AsyncJobKind::Workflow) {
+            result["result"] = job.result_workflow;
+        } else if (job.kind == AsyncJobKind::VidGen) {
             result["result"] = {
                 {"output_format", job.vid_gen.output_format},
                 {"mime_type", job.result_media_mime_type},
@@ -278,11 +300,10 @@ bool execute_img_gen_job(ServerRuntime& runtime,
             return false;
         }
         JobCancellationMonitor cancellation(runtime.sd_ctx, job);
-        set_preview_callback(job);
+        PreviewCallbackGuard preview(job);
         sd_image_generation_result_t* generated = nullptr;
         generate_image(runtime.sd_ctx, &params, &generated);
         results.adopt(generated, runtime.ctx_params->lora_model_dir);
-        clear_preview_callback();
         if (job.cancel_requested.load()) {
             return false;
         }
@@ -356,7 +377,7 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
             return false;
         }
         JobCancellationMonitor cancellation(runtime.sd_ctx, job);
-        set_preview_callback(job);
+        PreviewCallbackGuard preview(job);
         sd_video_generation_result_t* generated = nullptr;
         if (generate_video(runtime.sd_ctx, &params, &generated)) {
             output_fps       = generated->fps;
@@ -367,7 +388,6 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
             if (job.vid_gen.gen_params.embed_image_metadata)
                 str_params = results.generation_info(0);
         }
-        clear_preview_callback();
     }
 
     num_results = results.count();
@@ -434,8 +454,10 @@ void async_job_worker(ServerRuntime& runtime) {
         int output_frame_count = 0;
         int output_fps         = 0;
         std::string error_message;
+        json workflow_output;
         bool ok = false;
 
+        try {
         if (job->kind == AsyncJobKind::ImgGen) {
             ok = execute_img_gen_job(runtime, *job, output_images, output_info, error_message);
         } else if (job->kind == AsyncJobKind::VidGen) {
@@ -447,8 +469,15 @@ void async_job_worker(ServerRuntime& runtime) {
                                      output_fps,
                                      output_info,
                                      error_message);
+        } else if (job->kind == AsyncJobKind::Workflow) {
+            ok = execute_workflow_job(runtime, *job, workflow_output, error_message);
         } else {
             error_message = "unsupported job kind";
+        }
+        } catch (const std::exception& e) {
+            error_message = e.what();
+        } catch (...) {
+            error_message = "unknown generation exception";
         }
 
         {
@@ -463,10 +492,12 @@ void async_job_worker(ServerRuntime& runtime) {
                 job->status        = AsyncJobStatus::Cancelled;
                 job->error_code    = "cancelled";
                 job->error_message = "job cancelled by client";
+                job->result_workflow = nullptr;
             } else if (ok) {
                 job->status                 = AsyncJobStatus::Completed;
                 job->result_images_b64      = std::move(output_images);
                 job->result_generation_info = std::move(output_info);
+                job->result_workflow       = std::move(workflow_output);
                 job->result_media_b64       = std::move(output_media_b64);
                 job->result_media_mime_type = std::move(output_media_mime_type);
                 job->result_frame_count     = output_frame_count;
@@ -478,6 +509,7 @@ void async_job_worker(ServerRuntime& runtime) {
                 job->error_code    = "generation_failed";
                 job->error_message = error_message.empty() ? "unknown generation error" : error_message;
                 job->result_images_b64.clear();
+                job->result_workflow = nullptr;
                 job->result_generation_info = nullptr;
                 job->result_media_b64.clear();
                 job->result_media_mime_type.clear();
@@ -485,6 +517,10 @@ void async_job_worker(ServerRuntime& runtime) {
                 job->result_fps         = 0;
             }
 
+            if (job->kind == AsyncJobKind::Workflow && job->status != AsyncJobStatus::Completed) {
+                for (auto& state : job->workflow_node_states)
+                    if (state == "queued" || state == "running") state = "skipped";
+            }
             purge_expired_jobs(manager);
         }
     }

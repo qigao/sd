@@ -101,6 +101,33 @@ def exercise_server(executable):
                 require(code == 503 and error.get("code") == "model_not_loaded",
                         "generation without a model must fail explicitly")
 
+                if executable.name.startswith("sd-app-server"):
+                    # Exercise the native Workflow V1 parser over HTTP without
+                    # creating a model context or using fake inference weights.
+                    workflow = {
+                        "version": 1,
+                        "model": {"recipe": "@command-line", "revision": 0},
+                        "nodes": [{
+                            "id": "generate", "type": "sdcpp.image.generate",
+                            "depends_on": [],
+                            "params": {"prompt": "smoke", "width": 128,
+                                       "height": 128, "steps": 1}
+                        }],
+                        "outputs": ["generate"]
+                    }
+                    invalid = json.loads(json.dumps(workflow))
+                    invalid["nodes"][0]["params"]["arbitrary_key"] = True
+                    code, error = request_json(port, "POST", "/sdcpp/v1/workflows", invalid)
+                    require(code == 400 and error.get("code") == "invalid_workflow",
+                            "HTTP must reject unknown workflow parameters")
+                    code, error = request_json(port, "POST", "/sdcpp/v1/workflows", workflow)
+                    require(code == 503 and error.get("code") == "model_not_loaded",
+                            "valid V1 workflow must not enqueue without model weights")
+                    code, error = request_json(
+                        port, "POST", "/sdcpp/v1/workflows", {"payload": "x" * 65536})
+                    require(code == 413 and error.get("code") == "workflow_too_large",
+                            "HTTP workflow request must enforce its byte budget")
+
                 code, error = request_json(port, "POST", "/sdcpp/v1/models/load", {})
                 require(code == 400 and error.get("code") == "invalid_model_config",
                         "invalid model selection must be rejected")
