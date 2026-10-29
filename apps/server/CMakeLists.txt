@@ -27,8 +27,6 @@ endforeach()
 configure_file(recipes_builtin.h.in "${CMAKE_CURRENT_BINARY_DIR}/recipes_builtin.h" @ONLY)
 target_include_directories(sd-app-server PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 
-# Local development uses the editable WebUI's dev server or --serve-html-path.
-# No Node package installation or generated HTML is required to build this API.
 if(APPLE)
   sd_set_macos_rpaths(sd-app-server)
 endif()
