@@ -28,22 +28,33 @@ set_tests_properties(test_sd_upstream_api PROPERTIES
   WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_sd_upstream_api>")
 
 # Help and device-list commands exit before loading weights or opening a port.
-foreach(_frontend IN ITEMS cli server)
-  if(TARGET "sd-${_frontend}")
-    add_test(NAME "test_sd_${_frontend}_help" COMMAND "sd-${_frontend}" --help)
-    add_test(NAME "test_sd_${_frontend}_devices" COMMAND "sd-${_frontend}" --list-devices)
-    set_tests_properties("test_sd_${_frontend}_help" "test_sd_${_frontend}_devices"
-      PROPERTIES LABELS "sdcpp;no-weights" TIMEOUT 60
-                 WORKING_DIRECTORY "$<TARGET_FILE_DIR:sd-${_frontend}>")
+# Test each configured frontend so owned applications can coexist with upstream
+# examples without target-name or API routing collisions.
+if(TARGET sd-server OR TARGET sd-app-server)
+  find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+endif()
+foreach(_prefix IN ITEMS sd sd-app)
+  string(REPLACE "-" "_" _test_prefix "${_prefix}")
+  foreach(_frontend IN ITEMS cli server)
+    set(_target "${_prefix}-${_frontend}")
+    if(TARGET "${_target}")
+      add_test(NAME "test_${_test_prefix}_${_frontend}_help"
+        COMMAND "${_target}" --help)
+      add_test(NAME "test_${_test_prefix}_${_frontend}_devices"
+        COMMAND "${_target}" --list-devices)
+      set_tests_properties(
+        "test_${_test_prefix}_${_frontend}_help" "test_${_test_prefix}_${_frontend}_devices"
+        PROPERTIES LABELS "sdcpp;no-weights" TIMEOUT 60
+                   WORKING_DIRECTORY "$<TARGET_FILE_DIR:${_target}>")
+    endif()
+  endforeach()
+
+  if(TARGET "${_prefix}-server")
+    add_test(NAME "test_${_test_prefix}_http_no_model"
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/http_smoke.py"
+              "$<TARGET_FILE:${_prefix}-server>")
+    set_tests_properties("test_${_test_prefix}_http_no_model" PROPERTIES
+      LABELS "sdcpp;http;no-weights" TIMEOUT 45
+      WORKING_DIRECTORY "$<TARGET_FILE_DIR:${_prefix}-server>")
   endif()
 endforeach()
-
-if(TARGET sd-server)
-  find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
-  add_test(NAME test_sd_http_no_model
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/http_smoke.py"
-            "$<TARGET_FILE:sd-server>")
-  set_tests_properties(test_sd_http_no_model PROPERTIES
-    LABELS "sdcpp;http;no-weights" TIMEOUT 45
-    WORKING_DIRECTORY "$<TARGET_FILE_DIR:sd-server>")
-endif()

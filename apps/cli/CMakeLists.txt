@@ -1,0 +1,6 @@
+add_executable(sd-app-cli main.cpp image_metadata.cpp)
+target_link_libraries(sd-app-cli PRIVATE sd_app_common)
+if(APPLE)
+  sd_set_macos_rpaths(sd-app-cli)
+endif()
+install(TARGETS sd-app-cli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

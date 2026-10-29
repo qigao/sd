@@ -1,4 +1,4 @@
-"""Exercise the real upstream HTTP server without weights or inference."""
+"""Exercise a real native HTTP frontend without weights or inference."""
 
 import http.client
 import json
@@ -15,7 +15,7 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
-def request_json(port, method, path, body=None):
+def request_bytes(port, method, path, body=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
     try:
         encoded = None if body is None else json.dumps(body).encode("utf-8")
@@ -24,13 +24,17 @@ def request_json(port, method, path, body=None):
         response = connection.getresponse()
         payload = response.read(4 * 1024 * 1024 + 1)
         require(len(payload) <= 4 * 1024 * 1024, "HTTP smoke response exceeded 4 MiB")
-        require(response.getheader("Content-Type", "").startswith("application/json"),
-                path + " did not return JSON")
-        document = json.loads(payload)
-        require(isinstance(document, dict), path + " did not return a JSON object")
-        return response.status, document
+        return response.status, response.getheader("Content-Type", ""), payload
     finally:
         connection.close()
+
+
+def request_json(port, method, path, body=None):
+    status, content_type, payload = request_bytes(port, method, path, body)
+    require(content_type.startswith("application/json"), path + " did not return JSON")
+    document = json.loads(payload)
+    require(isinstance(document, dict), path + " did not return a JSON object")
+    return status, document
 
 
 def exercise_server(executable):
@@ -43,25 +47,38 @@ def exercise_server(executable):
     with tempfile.TemporaryDirectory(prefix="sd-http-smoke-") as temporary:
         model_directory = Path(temporary) / "models"
         model_directory.mkdir()
+        html_path = Path(temporary) / "index.html"
+        initial_html = b"<!doctype html><html><body>Initial local UI</body></html>"
+        rebuilt_html = b"<!doctype html><html><body>Rebuilt local UI</body></html>"
+        html_path.write_bytes(initial_html)
         with tempfile.TemporaryFile() as log:
             process = subprocess.Popen(
                 [str(executable), "--listen-ip", "127.0.0.1",
-                 "--listen-port", str(port), "--model-dir", str(model_directory)],
+                 "--listen-port", str(port), "--model-dir", str(model_directory),
+                 "--serve-html-path", str(html_path)],
                 cwd=executable.parent, stdin=subprocess.DEVNULL,
                 stdout=log, stderr=subprocess.STDOUT)
             try:
                 deadline = time.monotonic() + 15
                 while True:
-                    require(process.poll() is None, "sd-server exited before becoming ready")
+                    require(process.poll() is None, executable.name + " exited before becoming ready")
                     try:
                         code, status = request_json(port, "GET", "/sdcpp/v1/models/status")
                         break
                     except (OSError, http.client.HTTPException):
-                        require(time.monotonic() < deadline, "sd-server readiness deadline expired")
+                        require(time.monotonic() < deadline, executable.name + " readiness deadline expired")
                         time.sleep(0.05)
 
                 require(code == 200 and status.get("state") == "empty",
                         "server must start with an empty model context")
+
+                code, content_type, html = request_bytes(port, "GET", "/")
+                require(code == 200 and content_type.startswith("text/html") and html == initial_html,
+                        "the native server must serve the selected external UI file")
+                html_path.write_bytes(rebuilt_html)
+                code, content_type, html = request_bytes(port, "GET", "/")
+                require(code == 200 and content_type.startswith("text/html") and html == rebuilt_html,
+                        "rebuilding the external UI must be visible without restarting the server")
 
                 code, catalog = request_json(port, "GET", "/sdcpp/v1/recipes")
                 require(code == 200 and isinstance(catalog.get("recipes"), list)
@@ -91,8 +108,8 @@ def exercise_server(executable):
                 code, status = request_json(port, "POST", "/sdcpp/v1/models/unload", {})
                 require(code == 200 and status.get("state") == "empty",
                         "unloading an empty context must preserve the empty state")
-                require(process.poll() is None, "sd-server stopped while serving requests")
-                print("Upstream HTTP catalog, empty-context capabilities and error paths passed.")
+                require(process.poll() is None, executable.name + " stopped while serving requests")
+                print("Native HTTP catalog, empty-context capabilities, external UI reload and error paths passed.")
             except Exception:
                 log.seek(0, 2)
                 log.seek(max(0, log.tell() - 16384))
@@ -109,6 +126,6 @@ def exercise_server(executable):
 
 
 if __name__ == "__main__":
-    require(len(sys.argv) == 2, "usage: http_smoke.py /path/to/sd-server")
+    require(len(sys.argv) == 2, "usage: http_smoke.py /path/to/native-server")
     executable = Path(sys.argv[1]).resolve(strict=True)
     exercise_server(executable)

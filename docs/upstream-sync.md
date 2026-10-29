@@ -27,9 +27,13 @@ sd.cpp 和它的子模块保持未修改。`vendor/stable-diffusion.cpp` 的 git
    ctest --preset cpu-shared-server
    ```
 
-4. 核对公共 C API、结果释放、设备枚举、原生 CLI/server 入口和已覆盖 HTTP 行为。修改本仓库的前端适配和测试以跟随明确的上游变更，不修改 vendor 来满足旧测试。
+4. 核对公共 C API、结果释放、设备枚举、本地与上游 CLI/server 入口和已覆盖 HTTP 行为。修改 `apps/` 中的前端适配和测试以跟随明确的上游变更，不修改 vendor 来满足旧测试。本地 frontend 迁移基线见 [来源记录](frontend-migration.md)，不要覆盖应用改动。
 5. 对实际使用的硬件、模型和配置运行相应资格验证。CPU 无权重测试只验证接入，不证明采样结果、GPU 支持、RPC 远程运行、打包或性能。
 6. 更新 README/第三方来源中的版本链接、适配说明及验证证据，把 gitlink 与必要的前端改动放在同一个可审查提交中。
+
+Web UI 是 `frontend/` 中的应用源码。吸收其上游变化时，以记录的来源提交为基线比较；
+在该目录执行 `pnpm install --frozen-lockfile`、`pnpm type-check`、`pnpm build`，并验证
+实际原生服务的开发代理和单 HTML 交付。应用页面更新不要求修改引擎子模块。
 
 CPU 测试只需要 sd.cpp、其 GGML 子模块和测试用 Salts。CUDA、媒体编码或 Web UI 可能还需要嵌套子模块、SDK 或前端工具，按选定 commit 的 [上游构建文档](https://github.com/leejet/stable-diffusion.cpp/blob/77b72a2efed78f55de26892c7e909cee001e8b83/docs/build.md) 初始化。不要把 CPU CI 的依赖集合当作所有部署的完整依赖。
 
