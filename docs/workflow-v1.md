@@ -106,6 +106,11 @@ manager.mutex 下的读写；终态发布后不再执行下一节点。
   更不能替代将来 CHttp 的 streaming input/memory quota。
 
 服务关闭时停止新准入、取消排队中的任务并请求中断运行中任务，worker join 后再释放 context。
+原生预览回调现在被限制为不超过 4 MiPixels 的合法像素维度与 8 MiB PNG 编码输出；
+编码/分配失败会丢弃当次预览，绝不使异常越过 sd.cpp C ABI 回调边界。
+这一限额只影响可选预览，不截断正常推理输出；原生 CTest 验证边界计算，
+真实 callback 运行仍须实际模型门禁。
+
 取消运行节点时现有 sd.cpp monitor 请求取消，但仍需等待其真实计算和结果
 RAII 清理才写 cancelled；中断不强行释放仍被 native 代码借用的 context。
 节点异常形成 failed，不跳过关闭保护。没有模型时合法提案返回 503；
@@ -143,6 +148,14 @@ exactly-once/跨重启恢复依然不能保证。不得自动重发推理请求�
 | 无权重真实 HTTP CTest | 启动 sd-app-server，检查 400/413/503 以及普通 catalog/status | 真实生成 |
 | 真实模型资格门禁（可选，尚无运行证据） | 使用本地固定 SHA-256 manifest 的 /models/load、submit→poll→cancel/result、PNG CRC、切换和 reload 竞态 | 未提供权重时不得宣称通过 |
 | CHttp/H2/WS/鉴权（未实现） | 可信调用身份、按任务授权、流式 artifact、状态事件/背压及关闭竞态 | 由 httplib 测试替代 |
+
+真实权重脚本在调用 /models/load 之前，从 /recipes 与 /model-files 解析显式
+模型槽、recipe 隐式默认组件与 tae/taesd 同义槽，要求**所有最终要加载的组件**
+已经具有本地 SHA-256；加载成功后还核对服务回显的完整 model selection。
+默认 CTest self-test 覆盖未固定的隐式模型、TAE 默认组件拒绝及非法显式选择。
+这是真实文件摘要的事前准入检查，不是原生推理已成功的证据。
+模型目录应在资格验收期间保持只读：哈希完成与原生打开权重之间仍可能存在
+外部替换竞争；当前脚本无法提供文件系统事务快照或跨重启 weight revision。
 
 CI 不下载权重。已提供 `tests/workflow_real_model.py` 作为可选的真实权重准入测试，
 并由默认无权重 CTest 运行其 manifest/PNG 检查器 self-test（不是模型计算）。

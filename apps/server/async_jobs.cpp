@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <thread>
 
 #include "common/log.h"
 #include "common/media_io.h"
 #include "common/resource_owners.hpp"
 #include "workflow_execution.h"
+#include "preview_limits.h"
 
 class JobCancellationMonitor {
     std::mutex mutex_;
@@ -44,31 +46,42 @@ public:
 
 static void preview_callback(int step, int frame_count, sd_image_t* frames, bool is_noisy, void* data) {
     (void)is_noisy;
-    if (frame_count <= 0 || frames == nullptr || frames[0].data == nullptr) {
+    if (frame_count <= 0 || frames == nullptr || data == nullptr ||
+        frames[0].data == nullptr) {
         return;
     }
-
-    AsyncGenerationJob* job      = static_cast<AsyncGenerationJob*>(data);
-    const sd_image_t& frame      = frames[0];
-    const sd_preview_info_t info = sd_get_preview_info();
-
-    auto image_bytes = encode_image_to_vector(EncodedImageFormat::PNG,
-                                              frame.data,
-                                              frame.width,
-                                              frame.height,
-                                              frame.channel,
-                                              "",
-                                              80);
-    if (image_bytes.empty()) {
+    const sd_image_t& frame = frames[0];
+    if (!sd_app_preview_frame_in_budget(frame.width, frame.height, frame.channel))
         return;
-    }
 
-    std::string b64 = base64_encode(image_bytes);
-    std::lock_guard<std::mutex> lock(job->preview_mutex);
-    job->preview_b64         = std::move(b64);
-    job->preview_step        = step < 0 ? -step : step;
-    job->preview_pass        = info.sample_pass;
-    job->preview_total_steps = info.total_steps;
+    // This callback is invoked from the sd.cpp C ABI. Encoding, base64 and
+    // metadata/mutex operations can throw (for example bad_alloc). Never let
+    // an exception unwind across the native callback boundary or tear down
+    // an otherwise valid generation. Preview is best-effort, not an output.
+    try {
+        const sd_preview_info_t info = sd_get_preview_info();
+        auto image_bytes = encode_image_to_vector(EncodedImageFormat::PNG,
+                                                   frame.data,
+                                                   frame.width,
+                                                   frame.height,
+                                                   frame.channel,
+                                                   "",
+                                                   80);
+        if (image_bytes.empty() || image_bytes.size() > k_sd_app_preview_max_png_bytes)
+            return;
+
+        std::string encoded = base64_encode(image_bytes);
+        auto* job = static_cast<AsyncGenerationJob*>(data);
+        std::lock_guard<std::mutex> lock(job->preview_mutex);
+        job->preview_b64 = std::move(encoded);
+        job->preview_step = step < 0
+            ? (step == std::numeric_limits<int>::min() ? std::numeric_limits<int>::max() : -step)
+            : step;
+        job->preview_pass = info.sample_pass;
+        job->preview_total_steps = info.total_steps;
+    } catch (...) {
+        // Best-effort preview failure must not escape the native callback.
+    }
 }
 
 static void clear_preview_callback() {

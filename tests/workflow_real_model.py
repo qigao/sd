@@ -190,19 +190,86 @@ def check_png(encoded, width, height):
     return len(payload)
 
 
+def resolve_pinned_model_selection(recipe, catalog_files, pinned_digests, load):
+    """Mirror native recipe defaults and slot normalization BEFORE /models/load.
+
+    This contract deliberately supports one explicitly configured model root.
+    It does not simulate inference or silently accept external model sources.
+    """
+    slots = recipe.get("slots")
+    defaults = recipe.get("models", {})
+    require(isinstance(slots, list) and slots, "selected recipe has no model slots")
+    require(isinstance(defaults, dict), "recipe models defaults must be an object")
+    require(isinstance(catalog_files, list), "model catalog files must be an array")
+
+    declared = {slot["id"]: slot for slot in slots}
+    require(len(declared) == len(slots), "duplicate native recipe model slots")
+    selected = dict(load["models"])
+    for key, value in defaults.items():
+        if key in selected:
+            continue
+        if key in ("tae", "taesd") and ("tae" in selected or "taesd" in selected):
+            continue
+        selected[key] = value
+
+    # prepare_model_load() treats TAE spellings as one native model slot.
+    for slot in slots:
+        slot_id = slot["id"]
+        if slot_id in ("tae", "taesd"):
+            alias = "taesd" if slot_id == "tae" else "tae"
+            if alias in selected:
+                require(slot_id not in selected,
+                        "tae and taesd must not both be selected")
+                selected[slot_id] = selected.pop(alias)
+
+    by_id = {item["id"]: item for item in catalog_files}
+    require(len(by_id) == len(catalog_files), "model catalog has duplicate file IDs")
+    result = {}
+    for key, model_id in selected.items():
+        require(key in declared, "unknown recipe model slot: " + key)
+        require(isinstance(model_id, str), "model ID must be a string: " + key)
+        if not model_id:
+            continue
+        item = by_id.get(model_id)
+        require(item is not None, "selected model ID not in catalog: " + model_id)
+        relative = item.get("relative_path")
+        # One model_root is configured by this harness; the native catalog
+        # prefixes other roots with their root ID. Never accidentally pin a
+        # same-named file from another root.
+        require(model_id == relative,
+                "qualification only supports the configured primary model root")
+        require(relative in pinned_digests,
+                "model component has no pinned SHA-256 before load: " + relative)
+        categories = declared[key].get("categories",
+                                       [declared[key].get("category")])
+        require(item.get("category") in categories,
+                "model category incompatible with slot: " + key)
+        result[key] = model_id
+
+    for slot in slots:
+        if slot.get("required"):
+            require(slot["id"] in result,
+                    "required recipe model slot was not selected: " + slot["id"])
+    for group in recipe.get("required_any", []):
+        require(any(key in result for key in group),
+                "required_any recipe group is not selected: " + repr(group))
+    require(result, "no model files selected for native load")
+    return result
+
+
 def require_model_catalog(port, files, load):
     code, catalog = api(port, "GET", "/sdcpp/v1/model-files")
     require(code == 200, "model file catalog not accessible")
-    by_id = {item["id"]: item["relative_path"] for item in catalog.get("files", [])}
-    require(load["models"].values(), "no model files selected")
-    for model_id in load["models"].values():
-        require(model_id in by_id, "selected model ID not in catalog: " + model_id)
-        require(by_id[model_id] in files,
-                "selected model component has no pinned SHA-256: " + by_id[model_id])
     code, recipes = api(port, "GET", "/sdcpp/v1/recipes")
-    require(code == 200 and
-            any(item.get("id") == load["recipe"] for item in recipes.get("recipes", [])),
-            "selected recipe not in the live model catalog")
+    require(code == 200, "recipe catalog not accessible")
+    recipe = next((item for item in recipes.get("recipes", [])
+                   if item.get("id") == load["recipe"]), None)
+    require(recipe is not None, "selected recipe not in the live model catalog")
+    selection = resolve_pinned_model_selection(
+        recipe, catalog.get("files", []), files, load)
+    print("Pinned all selected components BEFORE native model load:",
+          json.dumps(selection, sort_keys=True), flush=True)
+    return selection
 
 
 def qualify(executable, manifest):
@@ -224,7 +291,7 @@ def qualify(executable, manifest):
                     "service must start with an empty model session")
             require(isinstance(empty.get("instance"), str) and len(empty["instance"]) == 32,
                     "missing native service instance identity")
-            require_model_catalog(port, files, load)
+            expected_selection = require_model_catalog(port, files, load)
 
             code, loaded = api(port, "POST", "/sdcpp/v1/models/load", load, timeout=max_wait)
             require(code == 200 and loaded.get("state") == "ready",
@@ -232,13 +299,10 @@ def qualify(executable, manifest):
             require(loaded.get("recipe") == load["recipe"] and
                     loaded.get("instance") == empty["instance"],
                     "loaded model identity differs from the requested session")
-            # Recipe defaults can fill additional components. Refuse to claim a
-            # fully pinned model if any effective selected file lacks a digest.
-            code, catalog = api(port, "GET", "/sdcpp/v1/model-files")
-            by_id = {item["id"]: item["relative_path"] for item in catalog.get("files", [])}
-            for model_id in loaded.get("models", {}).values():
-                require(model_id in by_id and by_id[model_id] in files,
-                        "loaded model includes an unpinned component: " + repr(model_id))
+            # A native load must resolve the very same set pinned in preflight.
+            # Never load first and only later reject implicit recipe components.
+            require(loaded.get("models") == expected_selection,
+                    "loaded components differ from preflight pinned selection")
 
             plan = make_plan(loaded, generation)
             stale = json.loads(json.dumps(plan))
@@ -396,6 +460,54 @@ def self_test():
             pass
         else:
             raise RuntimeError("SHA-256 mismatch was not rejected")
+
+        # Exercise native recipe default merging without loading any weights.
+        catalog = [{"id": "checkpoints/not-a-model.bin",
+                    "relative_path": "checkpoints/not-a-model.bin",
+                    "category": "checkpoints"}]
+        recipe = {"id": "dummy", "slots": [{"id": "model", "required": True,
+                                           "categories": ["checkpoints"]}],
+                  "models": {"model": "checkpoints/not-a-model.bin"}}
+        defaults_only = {"recipe": "dummy", "models": {}}
+        pinned = {"checkpoints/not-a-model.bin": "0" * 64}
+        selection = resolve_pinned_model_selection(recipe, catalog, pinned, defaults_only)
+        require(selection == {"model": "checkpoints/not-a-model.bin"},
+                "implicit recipe model default not resolved")
+        try:
+            resolve_pinned_model_selection(recipe, catalog, {}, defaults_only)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("unverified implicit recipe component was allowed before load")
+        try:
+            resolve_pinned_model_selection(recipe, catalog, pinned,
+                                           {"recipe": "dummy", "models":
+                                            {"model": "checkpoints/unknown.safetensors"}})
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("unknown explicitly selected model was allowed")
+
+        catalog.append({"id": "vae/tae.safetensors", "relative_path": "vae/tae.safetensors",
+                        "category": "vae"})
+        tae_recipe = {"id": "dummy", "slots": [
+            {"id": "model", "required": True, "categories": ["checkpoints"]},
+            {"id": "tae", "required": False, "categories": ["vae"]}],
+            "models": {"model": "checkpoints/not-a-model.bin",
+                       "taesd": "vae/tae.safetensors"}}
+        both_pinned = dict(pinned, **{"vae/tae.safetensors": "1" * 64})
+        selection = resolve_pinned_model_selection(
+            tae_recipe, catalog, both_pinned, defaults_only)
+        require(selection == {"model": "checkpoints/not-a-model.bin",
+                              "tae": "vae/tae.safetensors"}, "TAE alias not normalized")
+        try:
+            resolve_pinned_model_selection(
+                tae_recipe, catalog, pinned, defaults_only)
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("unverified TAE default escaped native preflight")
+
         image = bytes([0, 255, 0, 0])
         def chunk(kind, data):
             return struct.pack(">I", len(data)) + kind + data + \
@@ -413,7 +525,7 @@ def self_test():
             pass
         else:
             raise RuntimeError("corrupt PNG CRC was accepted")
-    print("PASS: real-model qualification harness parser, digest and PNG validator; no inference")
+    print("PASS: manifest SHA-256, native recipe default/TAE preflight and PNG validator; no inference")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,5 @@
 #include "async_jobs.h"
+#include "preview_limits.h"
 #include "tinytest.hpp"
 
 #include <atomic>
@@ -346,6 +347,21 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         std::lock_guard<std::mutex> lock(manager.mutex);
         check_equal(manager.jobs.size(), static_cast<size_t>(1));
         check_equal(manager.queue.size(), static_cast<size_t>(1));
+    }
+
+    it("bounds native preview frame allocation without restricting generation")
+    {
+        check_true(sd_app_preview_frame_in_budget(1024, 1024, 3));
+        check_true(sd_app_preview_frame_in_budget(2048, 2048, 4));
+        check_true(sd_app_preview_frame_in_budget(4096, 1024, 1));
+        check_false(sd_app_preview_frame_in_budget(2049, 2048, 3));
+        check_false(sd_app_preview_frame_in_budget(8192, 8192, 3));
+        check_false(sd_app_preview_frame_in_budget(0, 128, 3));
+        check_false(sd_app_preview_frame_in_budget(-1, 128, 3));
+        check_false(sd_app_preview_frame_in_budget(128, 0, 3));
+        check_false(sd_app_preview_frame_in_budget(128, 128, 0));
+        check_false(sd_app_preview_frame_in_budget(128, 128, 5));
+        check_false(sd_app_preview_frame_in_budget(2147483647LL, 2147483647LL, 4));
     }
 
 }
