@@ -73,9 +73,10 @@ def exercise_server(executable):
                 require(code == 200 and status.get("state") == "empty",
                         "server must start with an empty model context")
 
-                require(isinstance(status.get("instance"), str) and len(status["instance"]) == 32,
-                        "model runtime must advertise its process instance identity")
-                instance = status["instance"]
+                if executable.name.startswith("sd-app-server"):
+                    require(isinstance(status.get("instance"), str) and len(status["instance"]) == 32,
+                            "owned model runtime must advertise its process instance identity")
+                    instance = status["instance"]
 
                 code, content_type, html = request_bytes(port, "GET", "/")
                 require(code == 200 and content_type.startswith("text/html") and html == initial_html,
