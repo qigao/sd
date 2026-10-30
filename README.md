@@ -26,8 +26,10 @@
 无权重 CTest 包含 native image/video owner 接管测试；真实权重故障资格仍未完成。
 
 本地原生任务保留表另以每任务 128 MiB、全局 256 MiB 的**编码媒体**
-预算管理 Completed 结果，并在 TTL 清理时退回配额；这不包括 GPU/临时编码/
-HTTP reader 或用户级存储预算，正式集成仍需 CHttp 对象/会话配额。
+预算管理 Completed 结果，并在 TTL 清理时退回配额；图片 PNG/JPEG 输出
+回调现在可在分配 base64 之前拦截超额媒体，未选择的 Workflow 中间节点
+不进行媒体编码。视频/WebP 编码器内部、GPU、HTTP reader 与用户级存储
+仍不在完整配额范围内，正式服务需 CHttp 对象/会话配额。
 
 图像、视频及 Workflow 提交统一使用原子 `AsyncJobManager` 接纳与不可变 202 回执，
 默认 CI 的原生任务状态测试覆盖容量、并发接纳、取消/完成竞争与 TTL 回收。

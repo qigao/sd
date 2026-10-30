@@ -708,14 +708,31 @@ std::vector<uint8_t> encode_image_to_vector(EncodedImageFormat format,
                                             int height,
                                             int channels,
                                             const std::string& parameters,
-                                            int quality) {
+                                            int quality,
+                                            size_t max_encoded_bytes) {
     std::vector<uint8_t> buffer;
     const auto metadata = format == EncodedImageFormat::WEBP ? std::string() : generation_info_to_image_metadata(parameters);
+    bool failed_or_over_budget = false;
 
-    auto write_func = [&buffer](void* context, void* data, int size) {
+    // PNG/JPEG writers invoke a C callback. Never throw through stb's C
+    // boundary, and never buffer more than the caller's encoded media quota.
+    // The codec itself may use temporary memory; this bounds the output sink.
+    auto write_func = [&buffer, &failed_or_over_budget, max_encoded_bytes](
+                          void* context, void* data, int size) noexcept {
         (void)context;
-        uint8_t* src = reinterpret_cast<uint8_t*>(data);
-        buffer.insert(buffer.end(), src, src + size);
+        if (failed_or_over_budget || size == 0)
+            return;
+        if (size < 0 || data == nullptr ||
+            static_cast<size_t>(size) > max_encoded_bytes - buffer.size()) {
+            failed_or_over_budget = true;
+            return;
+        }
+        try {
+            const auto* src = static_cast<const uint8_t*>(data);
+            buffer.insert(buffer.end(), src, src + size);
+        } catch (...) {
+            failed_or_over_budget = true;
+        }
     };
 
     struct ContextWrapper {
@@ -755,7 +772,9 @@ std::vector<uint8_t> encode_image_to_vector(EncodedImageFormat format,
         LOG_ERROR("generation metadata exceeds the container capacity or the encoded image is invalid");
         result = 0;
     }
-    if (!result)
+    // JPEG metadata and WebP are processed outside the stb callback and may
+    // enlarge the buffer. The final result must still satisfy the same quota.
+    if (!result || failed_or_over_budget || buffer.size() > max_encoded_bytes)
         buffer.clear();
     return buffer;
 }

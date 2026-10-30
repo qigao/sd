@@ -1,6 +1,7 @@
 #ifndef __MEDIA_IO_H__
 #define __MEDIA_IO_H__
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -23,7 +24,8 @@ std::vector<uint8_t> encode_image_to_vector(EncodedImageFormat format,
                                             int height,
                                             int channels,
                                             const std::string& parameters = "",
-                                            int quality                   = 90);
+                                            int quality                   = 90,
+                                            size_t max_encoded_bytes      = static_cast<size_t>(-1));
 
 bool write_image_to_file(const std::string& path,
                          const uint8_t* image,

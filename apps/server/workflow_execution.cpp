@@ -77,7 +77,8 @@ bool validate_workflow_v1_admission(ServerRuntime& runtime,
 bool execute_workflow_job(ServerRuntime& runtime,
                           AsyncGenerationJob& job,
                           json& result,
-                          std::string& error) {
+                          std::string& error,
+                          size_t max_output_base64_bytes) {
     const WorkflowV1& workflow = job.workflow;
     if (!runtime.sd_ctx || !matches_model_binding(workflow, model_status(runtime))) {
         error = "model binding changed before execution";
@@ -86,6 +87,7 @@ bool execute_workflow_job(ServerRuntime& runtime,
 
     json selected = json::object();
     size_t resident_bytes = 0;
+    size_t retained_b64_bytes = 0;
     const auto execute = [&](size_t index, std::string& reason) -> bool {
         const auto& node = workflow.nodes[index];
         ImgGenJobRequest request;
@@ -95,27 +97,40 @@ bool execute_workflow_job(ServerRuntime& runtime,
         // sd.cpp generation monitor, so running cancellation reaches the native
         // context. No independent worker, callback, or inference provider.
         job.img_gen = std::move(request);
+        const bool selected_output =
+            std::find(workflow.outputs.begin(), workflow.outputs.end(), index) !=
+            workflow.outputs.end();
+        const size_t remaining_media = retained_b64_bytes <= max_output_base64_bytes
+            ? max_output_base64_bytes - retained_b64_bytes : 0;
+        const size_t remaining_workflow = resident_bytes <= k_workflow_v1_max_result_bytes
+            ? k_workflow_v1_max_result_bytes - resident_bytes : 0;
+
         std::vector<std::string> images;
         json metadata;
-        if (!execute_img_gen_job(runtime, job, images, metadata, reason)) return false;
-        if (images.size() != 1 || !metadata.is_array() || metadata.size() != images.size()) {
+        // depends_on is ordering only: a non-output node must not spend RAM
+        // encoding/base64-ing pixels that cannot feed a later node.
+        if (!execute_img_gen_job(runtime, job, images, metadata, reason,
+                                 std::min(remaining_media, remaining_workflow),
+                                 selected_output))
+            return false;
+        if (!selected_output)
+            return true;
+        if (images.size() != 1 || !metadata.is_array() || metadata.size() != 1) {
             reason = "workflow V1 generation returned an unexpected image count";
             return false;
         }
-
-        if (std::find(workflow.outputs.begin(), workflow.outputs.end(), index) != workflow.outputs.end()) {
-            const size_t bytes = images.front().size() + metadata.dump().size();
-            if (bytes > k_workflow_v1_max_result_bytes ||
-                resident_bytes > k_workflow_v1_max_result_bytes - bytes) {
-                reason = "workflow V1 result exceeds 8 MiB retained output budget";
-                return false;
-            }
-            resident_bytes += bytes;
-            json image = {{"index", 0},
-                          {"b64_json", std::move(images.front())},
-                          {"generation_info", std::move(metadata[0])}};
-            selected[node.id] = json::array({std::move(image)});
+        const size_t metadata_bytes = metadata.dump().size();
+        if (metadata_bytes > remaining_workflow ||
+            images.front().size() > remaining_workflow - metadata_bytes) {
+            reason = "workflow V1 result exceeds 8 MiB retained output budget";
+            return false;
         }
+        resident_bytes += metadata_bytes + images.front().size();
+        retained_b64_bytes += images.front().size();
+        json image = {{"index", 0},
+                      {"b64_json", std::move(images.front())},
+                      {"generation_info", std::move(metadata[0])}};
+        selected[node.id] = json::array({std::move(image)});
         return true;
     };
     const auto cancelled = [&]() { return job.cancel_requested.load(); };

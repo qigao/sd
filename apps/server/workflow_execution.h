@@ -18,4 +18,5 @@ bool validate_workflow_v1_admission(ServerRuntime& runtime,
 bool execute_workflow_job(ServerRuntime& runtime,
                           AsyncGenerationJob& job,
                           json& result,
-                          std::string& error);
+                          std::string& error,
+                          size_t max_output_base64_bytes);

@@ -137,7 +137,9 @@ bool execute_img_gen_job(ServerRuntime& runtime,
                          AsyncGenerationJob& job,
                          std::vector<std::string>& output_images,
                          json& output_info,
-                         std::string& error_message);
+                         std::string& error_message,
+                         size_t max_output_base64_bytes,
+                         bool publish_output = true);
 bool execute_vid_gen_job(ServerRuntime& runtime,
                          AsyncGenerationJob& job,
                          std::string& output_media_b64,
@@ -145,7 +147,8 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
                          int& output_frame_count,
                          int& output_fps,
                          json& output_info,
-                         std::string& error_message);
+                         std::string& error_message,
+                         size_t max_output_base64_bytes);
 void async_job_worker(ServerRuntime& runtime);
 // Stop admission, cancel queued jobs and request running cancellation before join.
 void stop_async_job_worker(AsyncJobManager& manager);

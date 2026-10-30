@@ -12,6 +12,7 @@
 #include "common/resource_owners.hpp"
 #include "workflow_execution.h"
 #include "preview_limits.h"
+#include "media_output_budget.h"
 
 class JobCancellationMonitor {
     std::mutex mutex_;
@@ -115,7 +116,9 @@ bool execute_img_gen_job(ServerRuntime& runtime,
                          AsyncGenerationJob& job,
                          std::vector<std::string>& output_images,
                          json& output_info,
-                         std::string& error_message) {
+                         std::string& error_message,
+                         size_t max_output_base64_bytes,
+                         bool publish_output) {
     output_info                = json::array();
     sd_img_gen_params_t params = job.img_gen.to_sd_img_gen_params_t();
 
@@ -150,6 +153,16 @@ bool execute_img_gen_job(ServerRuntime& runtime,
         return false;
     }
 
+    // Workflow V1 depends_on only orders native work; it does not consume
+    // previous pixels. Non-selected nodes must not allocate encoded media.
+    if (!publish_output) {
+        if (num_results != 1 || results[0].data == nullptr) {
+            error_message = "workflow node returned an unexpected native image count";
+            return false;
+        }
+        return !job.cancel_requested.load();
+    }
+
     EncodedImageFormat encoded_format = EncodedImageFormat::PNG;
     if (job.img_gen.output_format == "jpeg") {
         encoded_format = EncodedImageFormat::JPEG;
@@ -157,28 +170,55 @@ bool execute_img_gen_job(ServerRuntime& runtime,
         encoded_format = EncodedImageFormat::WEBP;
     }
 
+    size_t retained_b64_bytes = 0;
     for (int i = 0; i < num_results; ++i) {
+        if (job.cancel_requested.load()) {
+            error_message = "image job cancelled during encoding";
+            return false;
+        }
         if (results[i].data == nullptr) {
-            continue;
+            error_message = "native image result has no pixel data";
+            return false;
         }
 
+        // The native PNG/JPEG writer receives a bounded output sink; do not
+        // even attempt base64 allocation for media exceeding this task budget.
+        const size_t max_encoded_bytes = sd_app_max_encoded_bytes_for_base64(
+            retained_b64_bytes, max_output_base64_bytes);
+        if (max_encoded_bytes == 0) {
+            error_message = "native image exceeds per-job encoded media budget";
+            return false;
+        }
         const std::string metadata = job.img_gen.gen_params.embed_image_metadata
                                          ? results.generation_info(i)
                                          : "";
-        auto image_bytes           = encode_image_to_vector(encoded_format,
-                                                            results[i].data,
-                                                            results[i].width,
-                                                            results[i].height,
-                                                            results[i].channel,
-                                                            metadata,
-                                                            job.img_gen.output_compression);
-        if (image_bytes.empty()) {
-            continue;
+        auto image_bytes = encode_image_to_vector(encoded_format,
+                                                   results[i].data,
+                                                   results[i].width,
+                                                   results[i].height,
+                                                   results[i].channel,
+                                                   metadata,
+                                                   job.img_gen.output_compression,
+                                                   max_encoded_bytes);
+        if (!sd_app_encoded_bytes_fit_base64(
+                image_bytes.size(), retained_b64_bytes, max_output_base64_bytes)) {
+            error_message = "native image encoder failed or exceeded output budget";
+            return false;
         }
-        output_images.push_back(base64_encode(image_bytes));
+        std::string encoded = base64_encode(image_bytes);
+        if (encoded.empty() ||
+            encoded.size() > max_output_base64_bytes - retained_b64_bytes) {
+            error_message = "native image base64 exceeded per-job media budget";
+            return false;
+        }
+        retained_b64_bytes += encoded.size();
+        output_images.push_back(std::move(encoded));
         output_info.push_back(json::parse(results.generation_info(i)));
     }
-
+    if (job.cancel_requested.load()) {
+        error_message = "image job cancelled during encoding";
+        return false;
+    }
     if (output_images.empty()) {
         error_message = "generate_image returned empty encoded outputs";
         return false;
@@ -194,7 +234,8 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
                          int& output_frame_count,
                          int& output_fps,
                          json& output_info,
-                         std::string& error_message) {
+                         std::string& error_message,
+                         size_t max_output_base64_bytes) {
     sd_vid_gen_params_t params = job.vid_gen.to_sd_vid_gen_params_t();
     std::string str_params;
 
@@ -241,8 +282,23 @@ bool execute_vid_gen_job(ServerRuntime& runtime,
         error_message = "failed to encode generated video container";
         return false;
     }
-
-    output_media_b64       = base64_encode(video_bytes);
+    // Video muxers may still allocate temporary codec buffers. Reject an
+    // over-budget container before allocating the larger base64 copy.
+    if (!sd_app_encoded_bytes_fit_base64(
+            video_bytes.size(), 0, max_output_base64_bytes)) {
+        error_message = "native video exceeds per-job encoded media budget";
+        return false;
+    }
+    if (job.cancel_requested.load()) {
+        error_message = "video job cancelled during encoding";
+        return false;
+    }
+    output_media_b64 = base64_encode(video_bytes);
+    if (output_media_b64.empty() ||
+        output_media_b64.size() > max_output_base64_bytes) {
+        error_message = "native video base64 exceeds per-job media budget";
+        return false;
+    }
     output_media_mime_type = video_mime_type(job.vid_gen.output_format);
     output_frame_count     = num_results;
     return true;
@@ -253,6 +309,7 @@ void async_job_worker(ServerRuntime& runtime) {
 
     while (true) {
         std::shared_ptr<AsyncGenerationJob> job;
+        size_t max_output_base64_bytes = 0;
         {
             std::unique_lock<std::mutex> lock(manager.mutex);
             manager.cv.wait(lock, [&]() { return manager.stop || !manager.queue.empty(); });
@@ -269,6 +326,7 @@ void async_job_worker(ServerRuntime& runtime) {
             job = start_next_async_job(manager);
             if (!job)
                 continue;
+            max_output_base64_bytes = manager.max_job_media_bytes;
         }
 
         std::vector<std::string> output_images;
@@ -283,7 +341,8 @@ void async_job_worker(ServerRuntime& runtime) {
 
         try {
             if (job->kind == AsyncJobKind::ImgGen) {
-                ok = execute_img_gen_job(runtime, *job, output_images, output_info, error_message);
+                ok = execute_img_gen_job(runtime, *job, output_images, output_info,
+                                         error_message, max_output_base64_bytes);
             } else if (job->kind == AsyncJobKind::VidGen) {
                 ok = execute_vid_gen_job(runtime,
                                          *job,
@@ -292,9 +351,11 @@ void async_job_worker(ServerRuntime& runtime) {
                                          output_frame_count,
                                          output_fps,
                                          output_info,
-                                         error_message);
+                                         error_message,
+                                         max_output_base64_bytes);
             } else if (job->kind == AsyncJobKind::Workflow) {
-                ok = execute_workflow_job(runtime, *job, workflow_output, error_message);
+                ok = execute_workflow_job(runtime, *job, workflow_output,
+                                          error_message, max_output_base64_bytes);
             } else {
                 error_message = "unsupported job kind";
             }

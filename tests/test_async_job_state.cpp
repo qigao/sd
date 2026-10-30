@@ -1,12 +1,14 @@
 #include "async_jobs.h"
 #include "common/media_io.h"
 #include "preview_limits.h"
+#include "media_output_budget.h"
 #include "tinytest.hpp"
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <limits>
 #include <string>
 #include <stdexcept>
 #include <thread>
@@ -985,6 +987,50 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         check_false(sd_app_try_encode_preview(frame, small_encoder,
                                               oversized_b64, retained));
         check_equal(retained, std::string("old"));
+    }
+
+    it("bounds native PNG/JPEG encoder callbacks before allocating a base64 copy")
+    {
+        const std::uint8_t pixels[] = {
+            255, 0, 0,   0, 255, 0,
+            0, 0, 255,   255, 255, 255
+        };
+        for (const auto format : {EncodedImageFormat::PNG, EncodedImageFormat::JPEG}) {
+            const auto baseline = encode_image_to_vector(
+                format, pixels, 2, 2, 3, "", 85);
+            check_false(baseline.empty());
+            check_true(baseline.size() > 1);
+            const auto limited = encode_image_to_vector(
+                format, pixels, 2, 2, 3, "", 85, baseline.size());
+            check_true(limited == baseline);
+            const auto refused = encode_image_to_vector(
+                format, pixels, 2, 2, 3, "", 85, baseline.size() - 1);
+            check_true(refused.empty());
+            const size_t projected_b64 = ((baseline.size() + 2) / 3) * 4;
+            check_true(sd_app_encoded_bytes_fit_base64(
+                baseline.size(), 0, projected_b64));
+            check_false(sd_app_encoded_bytes_fit_base64(
+                baseline.size(), 0, projected_b64 - 1));
+        }
+    }
+
+    it("preflights cumulative base64 media length without overflow or encoding")
+    {
+        check_equal(sd_app_max_encoded_bytes_for_base64(0, 0),
+                    static_cast<size_t>(0));
+        check_equal(sd_app_max_encoded_bytes_for_base64(0, 3),
+                    static_cast<size_t>(0));
+        check_equal(sd_app_max_encoded_bytes_for_base64(0, 4),
+                    static_cast<size_t>(3));
+        check_equal(sd_app_max_encoded_bytes_for_base64(4, 12),
+                    static_cast<size_t>(6));
+        check_true(sd_app_encoded_bytes_fit_base64(6, 4, 12));
+        check_false(sd_app_encoded_bytes_fit_base64(7, 4, 12));
+        check_false(sd_app_encoded_bytes_fit_base64(1, 13, 12));
+        check_false(sd_app_encoded_bytes_fit_base64(0, 0, 12));
+        const size_t largest = std::numeric_limits<size_t>::max();
+        check_true(sd_app_max_encoded_bytes_for_base64(0, largest) <= largest);
+        check_false(sd_app_encoded_bytes_fit_base64(largest, 0, largest));
     }
 
 }
