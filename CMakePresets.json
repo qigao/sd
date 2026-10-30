@@ -1,0 +1,155 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}"
+    },
+    {
+      "name": "cpu-release",
+      "displayName": "CPU: static upstream library and C API tests",
+      "inherits": "base",
+      "cacheVariables": {
+        "SD_APP_BUILD_TESTS": true,
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_SHARED_LIBS": false,
+        "SD_BUILD_EXAMPLES": false,
+        "SD_BUILD_SHARED_LIBS": false,
+        "SD_BUILD_SHARED_GGML_LIB": false,
+        "SD_USE_SYSTEM_GGML": false,
+        "SD_USE_UPSTREAM_GGML": false,
+        "SD_WEBP": false,
+        "SD_WEBM": false,
+        "SD_CUDA": false,
+        "SD_HIPBLAS": false,
+        "SD_METAL": false,
+        "SD_VULKAN": false,
+        "SD_OPENCL": false,
+        "SD_SYCL": false,
+        "SD_MUSA": false,
+        "SD_RPC": false,
+        "GGML_CPU": true,
+        "GGML_NATIVE": false,
+        "GGML_CUDA": false,
+        "GGML_HIP": false,
+        "GGML_METAL": false,
+        "GGML_VULKAN": false,
+        "GGML_OPENCL": false,
+        "GGML_SYCL": false,
+        "GGML_MUSA": false,
+        "GGML_RPC": false,
+        "GGML_BACKEND_DL": false,
+        "GGML_BUILD_TESTS": false,
+        "GGML_BUILD_EXAMPLES": false,
+        "SD_APP_BUILD_CLI": false,
+        "SD_APP_BUILD_SERVER": false
+      }
+    },
+    {
+      "name": "cpu-shared-server",
+      "displayName": "CPU: shared backend with owned and upstream CLI/HTTP frontends",
+      "inherits": "cpu-release",
+      "cacheVariables": {
+        "BUILD_SHARED_LIBS": true,
+        "SD_BUILD_SHARED_LIBS": true,
+        "SD_BUILD_SHARED_GGML_LIB": true,
+        "GGML_BACKEND_DL": true,
+        "GGML_NATIVE": false,
+        "SD_RPC": true,
+        "GGML_RPC": true,
+        "SD_BUILD_EXAMPLES": true,
+        "SD_SERVER_BUILD_FRONTEND": false,
+        "SD_APP_BUILD_CLI": true,
+        "SD_APP_BUILD_SERVER": true
+      }
+    },
+    {
+      "name": "dev-cpu",
+      "displayName": "Local development: CPU, Debug, owned CLI/HTTP and tests",
+      "inherits": "cpu-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "GGML_NATIVE": true,
+        "SD_APP_BUILD_CLI": true,
+        "SD_APP_BUILD_SERVER": true
+      }
+    },
+    {
+      "name": "dev-cuda",
+      "displayName": "Local development: CUDA (requires toolkit and upstream CUTLASS)",
+      "inherits": "dev-cpu",
+      "cacheVariables": {
+        "SD_CUDA": true,
+        "GGML_CUDA": true
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release"
+    },
+    {
+      "name": "cpu-shared-server",
+      "configurePreset": "cpu-shared-server"
+    },
+    {
+      "name": "dev-cpu",
+      "configurePreset": "dev-cpu"
+    },
+    {
+      "name": "dev-cuda",
+      "configurePreset": "dev-cuda"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "cpu-shared-server",
+      "configurePreset": "cpu-shared-server",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "dev-cpu",
+      "configurePreset": "dev-cpu",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    },
+    {
+      "name": "dev-cuda",
+      "configurePreset": "dev-cuda",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error"
+      }
+    }
+  ]
+}

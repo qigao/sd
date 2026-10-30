@@ -1,0 +1,6 @@
+[submodule "vendor/stable-diffusion.cpp"]
+	path = vendor/stable-diffusion.cpp
+	url = https://github.com/leejet/stable-diffusion.cpp.git
+[submodule "vendor/salts"]
+	path = vendor/salts
+	url = https://github.com/qigao/salts.git

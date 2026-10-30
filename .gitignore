@@ -1,0 +1,7 @@
+/build/
+/models/
+/outputs/
+/CMakeUserPresets.json
+/compile_commands.json
+__pycache__/
+*.pyc

@@ -1,0 +1,102 @@
+name: Native service baseline and upstream sd.cpp (CPU)
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sd-integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpu-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [cpu-release, cpu-shared-server]
+    env:
+      INFERENCE_PRESET: ${{ matrix.preset }}
+      EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 2G
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Initialize selected upstream and test sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git submodule sync -- vendor/stable-diffusion.cpp vendor/salts
+          git submodule update --init --depth 1 -- vendor/stable-diffusion.cpp vendor/salts
+          git -C vendor/stable-diffusion.cpp submodule sync -- ggml
+          git -C vendor/stable-diffusion.cpp submodule update --init --depth 1 -- ggml
+
+      - name: Install CPU build and test tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential cmake ninja-build ccache python3
+
+      - name: Set compiler cache directory
+        shell: bash
+        run: printf 'CCACHE_DIR=%s/sd-ccache\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: sd-cpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'apps/**/CMakeLists.txt', 'CMakePresets.json') }}-${{ env.EXPECTED_SHA }}
+          restore-keys: |
+            sd-cpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.preset }}-
+            sd-cpu-ccache-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Configure selected upstream profile
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake --preset "$INFERENCE_PRESET" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          # Shared ccache artifacts must not contain instructions chosen from
+          # an arbitrary GitHub runner's CPU. Other hardware presets are unaffected.
+          if ! grep -Eq '^GGML_NATIVE:BOOL=(OFF|FALSE)$' "build/$INFERENCE_PRESET/CMakeCache.txt"; then
+            echo "ERROR: CPU CI must use a portable GGML_NATIVE=OFF variant" >&2
+            exit 1
+          fi
+
+      - name: Build complete configured graph
+        shell: bash
+        run: cmake --build --preset "$INFERENCE_PRESET"
+
+      - name: Test through CTest
+        shell: bash
+        run: ctest --preset "$INFERENCE_PRESET"
+
+      - name: Report compiler cache statistics
+        shell: bash
+        run: ccache --show-stats
+
+      - name: Verify unchanged tracked sources
+        if: always()
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
