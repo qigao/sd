@@ -142,9 +142,11 @@ exactly-once/跨重启恢复依然不能保证。不得自动重发推理请求�
 复制像素时使用溢出检查，拒绝畸形尺寸。
 
 原生 ADetailer 结果在元数据融合前立刻进入 C API 结果 guard，
-避免融合异常导致后续缓冲泄漏。无权重 `test_sd_app_native_image_owners`
-使用真实 sd.cpp C 数据结构和内存释放函数验证 image/video
-结果、C 数组、复制、owner 移交与多次 clear。
+避免融合异常导致后续缓冲泄漏。C API 的 `generation_info` 可为空指针，
+现在统一映射为空字符串，而不是触发 `std::string(nullptr)` 未定义行为。
+无权重 `test_sd_app_native_image_owners` 使用真实 sd.cpp C 数据结构和
+内存释放函数验证 image/video 结果、C 数组、复制、owner 移交与多次 clear；
+还会用非法元数据触发解析异常，证明已转移/未转移像素在异常退出时的归属。
 这不代替真实采样/ADetailer 执行、异常注入、GPU 释放与计数监测：
 仍需 Issue #2 的原生后端资格验收。
 

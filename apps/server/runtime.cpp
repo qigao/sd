@@ -163,7 +163,8 @@ bool apply_server_adetailer(ServerRuntime& runtime,
                 LOG_ERROR("ADetailer failed for image %d", i + 1);
                 return false;
             }
-            results.append_generation_info(i, detailed_owner->items[0].generation_info,
+            const char* detail_info = detailed_owner->items[0].generation_info;
+            results.append_generation_info(i, detail_info ? detail_info : "",
                                            runtime.ctx_params->lora_model_dir);
             free(results[i].data);
             results[i] = detailed_owner->items[0].image;

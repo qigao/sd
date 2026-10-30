@@ -1,6 +1,8 @@
 #include "common/resource_owners.hpp"
 #include "tinytest.hpp"
 
+#include <json.hpp>
+
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -140,4 +142,106 @@ spec("Native image owner adoption from real sd.cpp C ABI structs")
         check_equal(frames[1].data[0], static_cast<uint8_t>(68));
         check_true(!frames.generation_info(0).empty());
     }
+    it("accepts null image and video metadata pointers without constructing invalid strings")
+    {
+        auto* raw_image = static_cast<sd_image_generation_result_t*>(
+            std::calloc(1, sizeof(sd_image_generation_result_t)));
+        if (!raw_image) throw std::bad_alloc();
+        std::unique_ptr<sd_image_generation_result_t, decltype(&free_sd_image_generation_result)>
+            image_owner(raw_image, &free_sd_image_generation_result);
+        raw_image->items = static_cast<sd_image_result_t*>(
+            std::calloc(1, sizeof(sd_image_result_t)));
+        if (!raw_image->items) throw std::bad_alloc();
+        raw_image->count = 1;
+        raw_image->items[0].image = small_image(3);
+        // generation_info intentionally remains null on this C ABI result.
+        SDImageVec images;
+        images.adopt(image_owner.release());
+        check_equal(images.count(), 1);
+        check_true(images.generation_info(0).empty());
+        check_equal(images[0].data[0], static_cast<uint8_t>(3));
+
+        auto* raw_video = static_cast<sd_video_generation_result_t*>(
+            std::calloc(1, sizeof(sd_video_generation_result_t)));
+        if (!raw_video) throw std::bad_alloc();
+        std::unique_ptr<sd_video_generation_result_t, decltype(&free_sd_video_generation_result)>
+            video_owner(raw_video, &free_sd_video_generation_result);
+        raw_video->frames = static_cast<sd_image_t*>(
+            std::calloc(1, sizeof(sd_image_t)));
+        if (!raw_video->frames) throw std::bad_alloc();
+        raw_video->frame_count = 1;
+        raw_video->frames[0] = small_image(9);
+        SDImageVec frames;
+        frames.adopt_video(video_owner.release());
+        check_equal(frames.count(), 1);
+        check_true(frames.generation_info(0).empty());
+        check_equal(frames[0].data[0], static_cast<uint8_t>(9));
+    }
+
+    it("retires already-moved and untouched native pixels when metadata decoding throws")
+    {
+        auto* raw = static_cast<sd_image_generation_result_t*>(
+            std::calloc(1, sizeof(sd_image_generation_result_t)));
+        if (!raw) throw std::bad_alloc();
+        std::unique_ptr<sd_image_generation_result_t, decltype(&free_sd_image_generation_result)>
+            source(raw, &free_sd_image_generation_result);
+        raw->items = static_cast<sd_image_result_t*>(
+            std::calloc(3, sizeof(sd_image_result_t)));
+        if (!raw->items) throw std::bad_alloc();
+        raw->count = 3;
+        for (int i = 0; i < 3; ++i) {
+            raw->items[i].image = small_image(static_cast<unsigned char>(15 + i));
+            raw->items[i].generation_info = copied_metadata();
+        }
+        // Only the second metadata conversion fails; the third image has not
+        // yet been transferred when the C result guard is destroyed.
+        std::free(raw->items[1].generation_info);
+        raw->items[1].generation_info = static_cast<char*>(std::malloc(2));
+        if (!raw->items[1].generation_info) throw std::bad_alloc();
+        std::memcpy(raw->items[1].generation_info, "!", 2);
+
+        SDImageVec adopted;
+        bool rejected = false;
+        try {
+            // Nonempty LoRA root requires JSON parsing of native metadata.
+            adopted.adopt(source.release(), ".");
+        } catch (const nlohmann::json::parse_error&) {
+            rejected = true;
+        }
+        check_true(rejected);
+        check_equal(adopted.count(), 2);
+        check_equal(adopted[0].data[0], static_cast<uint8_t>(15));
+        check_equal(adopted[1].data[0], static_cast<uint8_t>(16));
+        adopted.clear();
+        check_true(adopted.empty());
+    }
+
+    it("retires native video frames when metadata parsing throws before transfer")
+    {
+        auto* raw = static_cast<sd_video_generation_result_t*>(
+            std::calloc(1, sizeof(sd_video_generation_result_t)));
+        if (!raw) throw std::bad_alloc();
+        std::unique_ptr<sd_video_generation_result_t, decltype(&free_sd_video_generation_result)>
+            source(raw, &free_sd_video_generation_result);
+        raw->frames = static_cast<sd_image_t*>(
+            std::calloc(2, sizeof(sd_image_t)));
+        if (!raw->frames) throw std::bad_alloc();
+        raw->frame_count = 2;
+        raw->frames[0] = small_image(5);
+        raw->frames[1] = small_image(6);
+        raw->generation_info = static_cast<char*>(std::malloc(2));
+        if (!raw->generation_info) throw std::bad_alloc();
+        std::memcpy(raw->generation_info, "!", 2);
+
+        SDImageVec adopted;
+        bool rejected = false;
+        try {
+            adopted.adopt_video(source.release(), ".");
+        } catch (const nlohmann::json::parse_error&) {
+            rejected = true;
+        }
+        check_true(rejected);
+        check_true(adopted.empty());
+    }
+
 }

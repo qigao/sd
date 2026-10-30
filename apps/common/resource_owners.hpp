@@ -252,7 +252,9 @@ public:
         for (int i = 0; i < result->count; ++i) {
             images_.push_back(result->items[i].image);
             result->items[i].image = {};
-            generation_infos_.push_back(generation_info_with_relative_lora_paths(result->items[i].generation_info, lora_model_dir));
+            const char* info = result->items[i].generation_info;
+            generation_infos_.push_back(generation_info_with_relative_lora_paths(
+                info ? info : "", lora_model_dir));
         }
     }
 
@@ -264,7 +266,8 @@ public:
             return;
         images_.reserve(static_cast<size_t>(result->frame_count));
         generation_infos_.reserve(static_cast<size_t>(result->frame_count));
-        const auto info = generation_info_with_relative_lora_paths(result->generation_info, lora_model_dir);
+        const auto info = generation_info_with_relative_lora_paths(
+            result->generation_info ? result->generation_info : "", lora_model_dir);
         for (int i = 0; i < result->frame_count; ++i) {
             images_.push_back(result->frames[i]);
             result->frames[i] = {};
