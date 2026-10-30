@@ -125,6 +125,9 @@ int main(int argc, const char** argv) {
 
     try {
         initialize_server_models(runtime);
+        // The model and job registry share exactly one process identity.
+        // This happens before the native worker and HTTP admission start.
+        async_job_manager.instance_id = models.instance_id;
     } catch (const std::exception& e) {
         LOG_ERROR("model catalog initialization failed: %s", e.what());
         return 1;

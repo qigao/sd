@@ -21,6 +21,10 @@ recipe="@command-line" 和 revision=0（必须有 origin="command_line"），但
 现有模型 manager/context owner 保持，不持久化原生指针。
 
 instance 是每次服务进程启动产生的非授权 nonce，防止跨进程沿用相同 revision 的旧工作流，不是安全凭据。
+`AsyncJobManager` 也复用这一实例身份，所有新 job ID 形如
+`job_<instance>_<timestamp>_<ordinal>`；重启后即使计数器与时间碰撞，
+也不会误将新进程任务标识等同于旧任务。轮询旧 ID 会得到未知任务，
+客户端不能自动重放工作流。实例 ID / job ID 都**不是权限凭据**。
 revision 是**当前服务实例的模型变更序号**，不是文件摘要、跨重启版本、
 可复现权重身份或持久修订。完整的来源/组件摘要身份留待 ModelPackage 等后续功能。
 不支持在 Workflow 中动态加载或卸载模型；这会打破当前单 context 与 pending

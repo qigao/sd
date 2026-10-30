@@ -10,6 +10,14 @@
 #include <utility>
 #include <vector>
 
+// A test harness uses a controlled non-secret process identity to exercise
+// the same real ID generator and admission owner without model weights.
+struct TestAsyncJobManager : AsyncJobManager {
+    TestAsyncJobManager() {
+        instance_id = "0123456789abcdef0123456789abcdef";
+    }
+};
+
 // These tests run the *production* queue/terminal publication code without
 // replacing the sd.cpp inference provider. Simulated results are only injected
 // at the owned worker completion boundary. They do not prove real weights.
@@ -42,7 +50,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 {
     it("publishes a failed native result without leaking partial media or completing dependents")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         std::lock_guard<std::mutex> lock(manager.mutex);
         auto job = enqueue(manager, AsyncJobKind::Workflow);
         check_true(start_next_async_job(manager) == job);
@@ -70,7 +78,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("drops owned inputs, outputs and preview at a queued-cancellation terminal")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         std::lock_guard<std::mutex> lock(manager.mutex);
         auto job = enqueue(manager, AsyncJobKind::Workflow);
         job->img_gen.gen_params.prompt = std::string(2048, 'x');
@@ -91,7 +99,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("lets cancel win before native success publication without retaining any result")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         std::lock_guard<std::mutex> lock(manager.mutex);
         auto job = enqueue(manager, AsyncJobKind::Workflow);
         check_true(start_next_async_job(manager) == job);
@@ -110,7 +118,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("preserves an already published success terminal after cancel loses")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         std::lock_guard<std::mutex> lock(manager.mutex);
         auto job = enqueue(manager, AsyncJobKind::Workflow);
         check_true(start_next_async_job(manager) == job);
@@ -128,7 +136,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("cancels queued work at shutdown without freeing the running native owner prematurely")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         std::shared_ptr<AsyncGenerationJob> running, waiting;
         {
             std::lock_guard<std::mutex> lock(manager.mutex);
@@ -155,7 +163,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
     it("serializes cancellation and success under the same owner mutex")
     {
         for (int iteration = 0; iteration < 64; ++iteration) {
-            AsyncJobManager manager;
+            TestAsyncJobManager manager;
             std::shared_ptr<AsyncGenerationJob> job;
             {
                 std::lock_guard<std::mutex> lock(manager.mutex);
@@ -199,7 +207,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("expires terminal payloads, preserves pending owners and then expires tombstones")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         std::lock_guard<std::mutex> lock(manager.mutex);
         auto finished = enqueue(manager, AsyncJobKind::Workflow);
         auto pending = enqueue(manager, AsyncJobKind::Workflow);
@@ -217,7 +225,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
     }
     it("commits a single immutable receipt before the worker can advance")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         auto job = std::make_shared<AsyncGenerationJob>();
         job->kind = AsyncJobKind::VidGen;
         const AsyncJobAdmission receipt = admit_async_job(manager, job);
@@ -241,7 +249,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("rejects stopped and full admissions without publishing a job")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         manager.max_pending_jobs = 0;
         auto waiting = std::make_shared<AsyncGenerationJob>();
         auto blocked = admit_async_job(manager, waiting);
@@ -264,7 +272,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("caps retained workflows independently of available pending slots")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         manager.max_pending_jobs = 64;
         std::vector<std::shared_ptr<AsyncGenerationJob>> admitted;
         for (int i = 0; i < 4; ++i) {
@@ -298,7 +306,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("admits at most one job under concurrent capacity contention")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         manager.max_pending_jobs = 1;
         constexpr int contenders = 12;
         std::atomic<int> started{0};
@@ -333,7 +341,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
 
     it("refuses re-admission of an already published job object")
     {
-        AsyncJobManager manager;
+        TestAsyncJobManager manager;
         auto job = std::make_shared<AsyncGenerationJob>();
         const auto first = admit_async_job(manager, job);
         check_true(first.status == AsyncJobAdmissionStatus::Accepted);
@@ -362,6 +370,57 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         check_false(sd_app_preview_frame_in_budget(128, 128, 0));
         check_false(sd_app_preview_frame_in_budget(128, 128, 5));
         check_false(sd_app_preview_frame_in_budget(2147483647LL, 2147483647LL, 4));
+    }
+
+    it("scopes native task IDs to the exact model service instance")
+    {
+        TestAsyncJobManager old_process;
+        TestAsyncJobManager current_process;
+        current_process.instance_id = "fedcba9876543210fedcba9876543210";
+        auto first = std::make_shared<AsyncGenerationJob>();
+        auto second = std::make_shared<AsyncGenerationJob>();
+        const auto old_receipt = admit_async_job(old_process, first);
+        const auto current_receipt = admit_async_job(current_process, second);
+        check_true(old_receipt.status == AsyncJobAdmissionStatus::Accepted);
+        check_true(current_receipt.status == AsyncJobAdmissionStatus::Accepted);
+        check_true(first->id != second->id);
+        check_true(first->id.find(old_process.instance_id) != std::string::npos);
+        check_true(second->id.find(current_process.instance_id) != std::string::npos);
+        check_true(json::parse(old_receipt.receipt_json)["id"] == first->id);
+        check_true(json::parse(current_receipt.receipt_json)["id"] == second->id);
+
+        // A process-local registry must never reuse a prior process's job
+        // identity even if the ordinal and timestamp happen to be the same.
+        std::lock_guard<std::mutex> lock(current_process.mutex);
+        check_true(current_process.jobs.find(first->id) == current_process.jobs.end());
+        check_true(current_process.expired_jobs.find(first->id) ==
+                   current_process.expired_jobs.end());
+    }
+
+    it("rejects admission before process identity initialization")
+    {
+        AsyncJobManager uninitialized;
+        auto job = std::make_shared<AsyncGenerationJob>();
+        bool invalid = false;
+        try {
+            (void)admit_async_job(uninitialized, job);
+        } catch (const std::logic_error&) {
+            invalid = true;
+        }
+        check_true(invalid);
+        check_true(job->id.empty());
+        check_true(uninitialized.jobs.empty());
+        check_true(uninitialized.queue.empty());
+
+        uninitialized.instance_id = "0000-not-lowercase-hex-0000000";
+        invalid = false;
+        try {
+            (void)admit_async_job(uninitialized, job);
+        } catch (const std::logic_error&) {
+            invalid = true;
+        }
+        check_true(invalid);
+        check_true(uninitialized.jobs.empty());
     }
 
 }

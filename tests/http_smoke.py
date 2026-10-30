@@ -77,6 +77,13 @@ def exercise_server(executable):
                     require(isinstance(status.get("instance"), str) and len(status["instance"]) == 32,
                             "owned model runtime must advertise its process instance identity")
                     instance = status["instance"]
+                    # Jobs from a previous service instance may not alias this
+                    # service's registry. No weight or fake inference is needed.
+                    stale_id = "job_" + ("0" * 32 if instance != "0" * 32 else "1" * 32) + "_0_00000000"
+                    code, old_job = request_json(
+                        port, "GET", "/sdcpp/v1/jobs/" + stale_id)
+                    require(code == 404 and old_job.get("error") == "job not found",
+                            "stale service-instance job ID was recognized")
 
                 code, content_type, html = request_bytes(port, "GET", "/")
                 require(code == 200 and content_type.startswith("text/html") and html == initial_html,

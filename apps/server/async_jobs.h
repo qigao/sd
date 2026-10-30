@@ -65,6 +65,9 @@ struct AsyncJobManager {
     std::unordered_map<std::string, std::shared_ptr<AsyncGenerationJob>> jobs;
     std::unordered_map<std::string, int64_t> expired_jobs;
     std::deque<std::string> queue;
+    // Must be initialized from ServerModels.instance_id before worker startup.
+    // Task IDs are process-scoped identifiers, never authentication tokens.
+    std::string instance_id;
     uint64_t next_id              = 0;
     bool stop                     = false;
     size_t max_pending_jobs       = 64;

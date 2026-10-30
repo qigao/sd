@@ -86,9 +86,19 @@ size_t count_pending_jobs(const AsyncJobManager& manager) {
 }
 
 std::string make_async_job_id(AsyncJobManager& manager) {
+    // Same runtime nonce as /sdcpp/v1/models/status. An unrelated restarted
+    // process must never alias a stale job ID even when timestamp and ordinal
+    // collide. This identifier does not convey job authorization.
+    const auto& instance = manager.instance_id;
+    if (instance.size() != 32 ||
+        !std::all_of(instance.begin(), instance.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::logic_error("async job owner lacks a valid process instance");
+    }
     std::ostringstream oss;
-    oss << "job_" << std::hex << unix_timestamp_now_ms() << "_" << std::setw(8)
-        << std::setfill('0') << manager.next_id++;
+    oss << "job_" << instance << "_" << std::hex << unix_timestamp_now_ms()
+        << "_" << std::setw(8) << std::setfill('0') << manager.next_id++;
     return oss.str();
 }
 
