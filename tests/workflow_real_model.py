@@ -159,35 +159,115 @@ def make_plan(status, generation, two=True):
             "nodes": [second, first], "outputs": ["final"]}
 
 
+MAX_PNG_BYTES = 8 * 1024 * 1024
+
+
+def _png_paeth(left, above, upper_left):
+    # PNG filter 4: ties prefer left, then above, then upper-left.
+    predicted = left + above - upper_left
+    dl, du, dul = abs(predicted - left), abs(predicted - above), abs(predicted - upper_left)
+    if dl <= du and dl <= dul:
+        return left
+    if du <= dul:
+        return above
+    return upper_left
+
+
 def check_png(encoded, width, height):
+    """Decode actual PNG IDAT pixels with bounded memory, not just chunk CRCs.
+
+    This is a small test-only 8-bit, non-interlaced decoder for the native
+    encoder's grayscale/GA/RGB/RGBA output. Unexpected layouts fail closed.
+    No PIL dependency and no alternate image-generation provider.
+    """
+    require(isinstance(encoded, (str, bytes)) and
+            len(encoded) <= ((MAX_PNG_BYTES + 2) // 3) * 4 + 4,
+            "generated PNG base64 exceeds media budget")
     try:
         payload = base64.b64decode(encoded, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise RuntimeError("invalid base64 generated image") from exc
+    require(8 < len(payload) <= MAX_PNG_BYTES, "PNG payload exceeds media budget")
     require(payload.startswith(b"\x89PNG\r\n\x1a\n"), "generated media is not PNG")
-    offset, saw_idat, saw_end = 8, False, False
-    dimensions = None
+
+    offset, dimensions, channels = 8, None, None
+    idat_chunks, idat_length = [], 0
+    saw_idat, ended_idat, saw_end = False, False, False
     while offset + 12 <= len(payload):
         length = struct.unpack_from(">I", payload, offset)[0]
-        require(length <= 8 * 1024 * 1024, "PNG chunk exceeds expected bounds")
+        require(length <= MAX_PNG_BYTES, "PNG chunk exceeds media budget")
         end = offset + 12 + length
         require(end <= len(payload), "truncated PNG chunk")
-        kind = payload[offset + 4: offset + 8]
-        data = payload[offset + 8: offset + 8 + length]
-        expected_crc = struct.unpack_from(">I", payload, offset + 8 + length)[0]
-        require(zlib.crc32(kind + data) & 0xffffffff == expected_crc, "PNG CRC mismatch")
+        kind = payload[offset + 4:offset + 8]
+        data = payload[offset + 8:offset + 8 + length]
+        crc = struct.unpack_from(">I", payload, offset + 8 + length)[0]
+        require(zlib.crc32(kind + data) & 0xffffffff == crc, "PNG CRC mismatch")
         if offset == 8:
             require(kind == b"IHDR" and length == 13, "PNG IHDR missing")
-            dimensions = struct.unpack_from(">II", data, 0)
+            w, h, depth, color, compression, filtering, interlace = struct.unpack(
+                ">IIBBBBB", data)
+            require(w > 0 and h > 0 and (w, h) == (width, height),
+                    "actual PNG dimensions differ from request")
+            require(depth == 8 and color in (0, 2, 4, 6) and
+                    compression == 0 and filtering == 0 and interlace == 0,
+                    "unsupported PNG pixel layout (8-bit non-interlaced required)")
+            dimensions = (w, h)
+            channels = {0: 1, 2: 3, 4: 2, 6: 4}[color]
+        elif kind == b"IHDR":
+            raise RuntimeError("duplicate PNG IHDR")
         if kind == b"IDAT":
+            require(not ended_idat, "non-consecutive PNG IDAT chunks")
+            idat_length += length
+            require(idat_length <= MAX_PNG_BYTES, "PNG IDAT exceeds media budget")
+            idat_chunks.append(data)
             saw_idat = True
-        offset = end
+        elif saw_idat and kind != b"IEND":
+            ended_idat = True
         if kind == b"IEND":
+            require(length == 0, "PNG IEND must be empty")
             saw_end = True
+            offset = end
             break
-    require(saw_idat and saw_end and offset == len(payload), "PNG missing IDAT/IEND or trailing data")
-    require(dimensions == (width, height), "actual output dimensions differ from request")
-    return len(payload)
+        offset = end
+
+    require(saw_idat and saw_end and offset == len(payload),
+            "PNG missing IDAT/IEND or trailing bytes")
+    require(dimensions is not None, "PNG IHDR missing")
+    row_length = dimensions[0] * channels
+    decoded_length = (row_length + 1) * dimensions[1]
+    inflater = zlib.decompressobj()
+    try:
+        # Cap the inflater *during* decode: a correctly CRC'd PNG may still
+        # contain an invalid/oversized compressed pixel stream.
+        scanlines = inflater.decompress(b"".join(idat_chunks), decoded_length + 1)
+    except zlib.error as exc:
+        raise RuntimeError("PNG IDAT zlib decode failed") from exc
+    require(len(scanlines) == decoded_length and inflater.eof and
+            not inflater.unconsumed_tail and not inflater.unused_data,
+            "PNG IDAT decompression produced malformed scanlines")
+
+    digest = hashlib.sha256()
+    previous = bytearray(row_length)
+    offset = 0
+    for _ in range(dimensions[1]):
+        filter_mode = scanlines[offset]
+        offset += 1
+        require(filter_mode <= 4, "PNG uses invalid scanline filter")
+        row = bytearray(scanlines[offset:offset + row_length])
+        offset += row_length
+        if filter_mode:
+            for column in range(row_length):
+                left = row[column - channels] if column >= channels else 0
+                above = previous[column]
+                upper_left = previous[column - channels] if column >= channels else 0
+                correction = (left if filter_mode == 1 else
+                              above if filter_mode == 2 else
+                              (left + above) // 2 if filter_mode == 3 else
+                              _png_paeth(left, above, upper_left))
+                row[column] = (row[column] + correction) & 0xff
+        digest.update(row)
+        previous = row
+    return len(payload), digest.hexdigest()
 
 
 def resolve_pinned_model_selection(recipe, catalog_files, pinned_digests, load):
@@ -343,8 +423,10 @@ def qualify(executable, manifest):
             images = result["outputs"][0].get("images", [])
             require(len(images) == 1 and "generation_info" in images[0],
                     "real result/metadata ownership not preserved")
-            size = check_png(images[0]["b64_json"], generation["width"], generation["height"])
-            print("Native generated PNG verified:", size, "bytes", flush=True)
+            size, decoded_digest = check_png(
+                images[0]["b64_json"], generation["width"], generation["height"])
+            print("Native PNG pixels decoded:", size, "bytes; SHA-256:", decoded_digest,
+                  flush=True)
 
             code, error = api(port, "GET", "/sdcpp/v1/jobs/" + job_id,
                               extra_headers={"Origin": "https://evil.example"})
@@ -515,17 +597,55 @@ def self_test():
         ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
         png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + \
             chunk(b"IDAT", zlib.compress(image)) + chunk(b"IEND", b"")
-        require(check_png(base64.b64encode(png), 1, 1) == len(png),
-                "PNG structure validation self-test failed")
+        size, digest = check_png(base64.b64encode(png), 1, 1)
+        require(size == len(png) and digest == hashlib.sha256(image[1:]).hexdigest(),
+                "PNG pixel decode self-test failed")
+
+        def assert_bad_png(value, message):
+            try:
+                check_png(base64.b64encode(value), 1, 1)
+            except RuntimeError:
+                pass
+            else:
+                raise RuntimeError(message)
+
         broken = bytearray(png)
         broken[-5] ^= 1
-        try:
-            check_png(base64.b64encode(broken), 1, 1)
-        except RuntimeError:
-            pass
-        else:
-            raise RuntimeError("corrupt PNG CRC was accepted")
-    print("PASS: manifest SHA-256, native recipe default/TAE preflight and PNG validator; no inference")
+        assert_bad_png(broken, "corrupt PNG CRC was accepted")
+        # These next cases have freshly computed *correct* CRCs, unlike the
+        # previous case. They must still fail because their pixels are invalid.
+        def image_png(raw_idat, depth=8, interlace=0, width=1, height=1):
+            header = struct.pack(">IIBBBBB", width, height, depth, 2, 0, 0, interlace)
+            return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) +
+                    chunk(b"IDAT", raw_idat) + chunk(b"IEND", b""))
+
+        assert_bad_png(image_png(zlib.compress(b"\xff\xff\x00\x00")),
+                       "valid CRC with invalid PNG filter was accepted")
+        assert_bad_png(image_png(b"not zlib data"),
+                       "valid CRC with corrupt zlib stream was accepted")
+        assert_bad_png(image_png(zlib.compress(b"\x00\xff\x00")),
+                       "valid CRC with truncated pixels was accepted")
+        assert_bad_png(image_png(zlib.compress(b"\x00" * 1024)),
+                       "valid CRC with decompression bomb was accepted")
+        assert_bad_png(image_png(zlib.compress(image), interlace=1),
+                       "unsupported PNG interlace was accepted")
+        for filter_mode in range(5):
+            candidate = image_png(zlib.compress(bytes([filter_mode, 255, 0, 0])))
+            _, decoded = check_png(base64.b64encode(candidate), 1, 1)
+            require(decoded == hashlib.sha256(b"\xff\x00\x00").hexdigest(),
+                    "PNG scanline filter failed to decode real RGB pixels")
+        two_red_pixels = hashlib.sha256(b"\xff\x00\x00" * 2).hexdigest()
+        # Filter 1 (Sub) uses the already reconstructed left pixel.
+        sub_scanline = b"\x01\xff\x00\x00\x00\x00\x00"
+        _, decoded = check_png(base64.b64encode(
+            image_png(zlib.compress(sub_scanline), width=2)), 2, 1)
+        require(decoded == two_red_pixels, "PNG Sub predictor did not restore the second pixel")
+        # Filter 2 (Up) uses bytes from the previous reconstructed scanline.
+        up_scanlines = b"\x00\xff\x00\x00\x02\x00\x00\x00"
+        _, decoded = check_png(base64.b64encode(
+            image_png(zlib.compress(up_scanlines), height=2)), 1, 2)
+        require(decoded == two_red_pixels, "PNG Up predictor did not restore the second row")
+    print("PASS: pre-load SHA-256/recipe selection and bounded real PNG pixel decode; no inference")
 
 
 if __name__ == "__main__":
