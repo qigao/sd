@@ -138,11 +138,11 @@ def exercise_server(executable):
                             "HTTP must reject malformed model instance")
                     code, error = request_json(port, "POST", "/sdcpp/v1/workflows",
                                                workflow, {"Origin": "https://evil.example"})
-                    require(code == 403 and error.get("code") == "workflow_local_only",
+                    require(code == 403 and error.get("code") == "untrusted_origin",
                             "cross-origin workflows must not be admitted on loopback")
                     code, error = request_json(port, "POST", "/sdcpp/v1/workflows",
                                                workflow, {"Host": "rebinding.example"})
-                    require(code == 403 and error.get("code") == "workflow_local_only",
+                    require(code == 403 and error.get("code") == "untrusted_host",
                             "untrusted Host must not be accepted for workflow admission")
                     code, error = request_json(port, "POST", "/sdcpp/v1/workflows", workflow)
                     require(code == 503 and error.get("code") == "model_not_loaded",
@@ -151,6 +151,20 @@ def exercise_server(executable):
                         port, "POST", "/sdcpp/v1/workflows", {"payload": "x" * 65536})
                     require(code == 413 and error.get("code") == "workflow_too_large",
                             "HTTP workflow request must enforce its byte budget")
+
+                if executable.name.startswith("sd-app-server"):
+                    code, error = request_json(port, "POST", "/sdcpp/v1/models/unload",
+                                               {}, {"Origin": "https://evil.example"})
+                    require(code == 403 and error.get("code") == "untrusted_origin",
+                            "legacy native model controls must reject cross-origin writes")
+                    code, error = request_json(port, "GET", "/sdcpp/v1/models/status",
+                                               extra_headers={"Host": "rebinding.example"})
+                    require(code == 403 and error.get("code") == "untrusted_host",
+                            "legacy model status must reject DNS-rebinding Host")
+                    code, error = request_json(port, "POST", "/sdcpp/v1/models/unload",
+                                               {}, {"Origin": "http://127.0.0.1:" + str(port)})
+                    require(code == 200 and error.get("state") == "empty",
+                            "legitimate same-origin native model control must keep working")
 
                 code, error = request_json(port, "POST", "/sdcpp/v1/models/load", {})
                 require(code == 400 and error.get("code") == "invalid_model_config",

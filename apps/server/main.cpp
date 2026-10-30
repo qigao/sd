@@ -134,16 +134,36 @@ int main(int argc, const char** argv) {
 
     httplib::Server svr;
 
-    svr.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
-        std::string origin = req.get_header_value("Origin");
-        if (origin.empty()) {
-            origin = "*";
+    svr.set_pre_routing_handler([&svr_params](const httplib::Request& req, httplib::Response& res) {
+        // This is an unauthenticated native development baseline, NOT the
+        // CHttp HTTP/2 Service. Do not reflect arbitrary browser origins or
+        // permit DNS-rebinding Host headers against the default loopback bind.
+        const std::string host = req.get_header_value("Host");
+        const std::string port = std::to_string(svr_params.listen_port);
+        const bool loopback = svr_params.listen_ip == "127.0.0.1" ||
+                              svr_params.listen_ip == "::1";
+        const bool local_host = host == "127.0.0.1:" + port ||
+                                host == "localhost:" + port ||
+                                host == "[::1]:" + port;
+        if (loopback && !local_host) {
+            res.status = 403;
+            res.set_content(R"({"code":"untrusted_host","error":"local service requires a loopback Host"})",
+                            "application/json");
+            return httplib::Server::HandlerResponse::Handled;
         }
-        res.set_header("Access-Control-Allow-Origin", origin);
-        res.set_header("Access-Control-Allow-Credentials", "true");
-        res.set_header("Access-Control-Allow-Methods", "*");
-        res.set_header("Access-Control-Allow-Headers", "*");
-
+        const std::string origin = req.get_header_value("Origin");
+        const std::string referer = req.get_header_value("Referer");
+        const std::string same_origin = "http://" + host;
+        if ((!origin.empty() && origin != same_origin) ||
+            (!referer.empty() && referer.compare(0, same_origin.size() + 1,
+                                                same_origin + "/") != 0)) {
+            res.status = 403;
+            res.set_content(R"({"code":"untrusted_origin","error":"cross-origin browser access is disabled"})",
+                            "application/json");
+            return httplib::Server::HandlerResponse::Handled;
+        }
+        // Same-origin documents do not need Access-Control-Allow-* headers.
+        // Client code still speaks HTTP/1.1 in this interim server.
         if (req.method == "OPTIONS") {
             res.status = 204;
             return httplib::Server::HandlerResponse::Handled;

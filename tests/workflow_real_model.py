@@ -284,11 +284,11 @@ def qualify(executable, manifest):
 
             code, error = api(port, "GET", "/sdcpp/v1/jobs/" + job_id,
                               extra_headers={"Origin": "https://evil.example"})
-            require(code == 403 and error.get("code") == "workflow_local_only",
+            require(code == 403 and error.get("code") == "untrusted_origin",
                     "cross-origin read of a workflow result was allowed")
             code, error = api(port, "POST", "/sdcpp/v1/jobs/" + job_id + "/cancel", {},
                               extra_headers={"Origin": "https://evil.example"})
-            require(code == 403 and error.get("code") == "workflow_local_only",
+            require(code == 403 and error.get("code") == "untrusted_origin",
                     "cross-origin cancellation of a workflow was allowed")
 
             code, terminal_cancel = api(port, "POST", "/sdcpp/v1/jobs/" + job_id + "/cancel", {})

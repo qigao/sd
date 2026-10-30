@@ -4,7 +4,9 @@
 [stable-diffusion.cpp](https://github.com/leejet/stable-diffusion.cpp)，服务重构以 CHttp 为基础，
 目标是让客户端通过 HTTP/2 提交任务、查询状态和获取结果，通过 WebSocket 接收任务事件。
 
-本应用已移除 Node.js、pnpm、Vue/Vite 前端源码与对应 CI。KFCore、ONNX/TensorRT 按实际
+本应用已移除 Node.js、pnpm、Vue/Vite 前端源码与对应 CI。
+本地 httplib 基线默认拒绝任意跨源 Origin、Referer 和 DNS-rebinding Host，
+不再对任意网页开放带凭据的 CORS；这不是正式的 CHttp 身份认证。KFCore、ONNX/TensorRT 按实际
 计算节点需要接入，不是使用 sd.cpp 的条件。
 
 ## 当前实现与重构方向

@@ -3,9 +3,11 @@
 本规范在 sd-app-server 的既有 httplib /sdcpp 路由上实现。当前还没有接入
 CHttp HTTP/2、WebSocket、可信身份、产物存储或多租户权限；**不是**
 docs/chttp-service-design.md 的未来 /v1/jobs API。只允许绑定 127.0.0.1
-或 ::1 的本地开发服务提交 V1。临时入口会拒绝带 Origin/Referer 的请求及非本地 Host，
-同一约束适用于 Workflow job 查询、结果和取消；但这仍然不是调用者认证，其他旧路由
-仍保留原来的安全边界。不能因为本功能存在就开放现有 httplib 服务到公网。
+或 ::1 的本地开发服务提交 V1。临时工作流入口继续拒绝带 Origin/Referer 的请求及非本地 Host，
+同一约束适用于 Workflow job 查询、结果和取消。自有 httplib 服务也不再反射任意
+Origin/启用凭据式 CORS；默认 loopback 绑定拒绝非本地 Host，所有自有路由拒绝跨源
+Origin/Referer。合法同源请求不需要 CORS 授权头。但它仍然不是用户认证，
+非 loopback 的旧服务也不是受保护的多租户 API。不能因为本功能存在就开放现有 httplib 服务到公网。
 
 ## 模型身份与既有引擎
 
