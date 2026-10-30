@@ -165,7 +165,7 @@ AsyncJobAdmission admit_async_job(AsyncJobManager& manager,
     return admission;
 }
 
-namespace { void release_generation_inputs(AsyncGenerationJob& job); }
+namespace { void release_generation_inputs(AsyncGenerationJob& job) noexcept; }
 
 bool cancel_queued_job(AsyncJobManager& manager, AsyncGenerationJob& job) {
     auto new_end = std::remove(manager.queue.begin(), manager.queue.end(), job.id);
