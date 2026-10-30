@@ -74,41 +74,18 @@ void register_workflow_endpoints(httplib::Server& server, ServerRuntime& runtime
             job->kind = AsyncJobKind::Workflow;
             job->workflow = std::move(workflow);
             job->workflow_node_states.assign(job->workflow.nodes.size(), "queued");
-            json receipt;
-            {
-                // RuntimeRoutes::protect holds the shared model transition lock
-                // until after this entire admission commit.
-                std::lock_guard<std::mutex> lock(manager.mutex);
-                purge_expired_jobs(manager);
-                if (manager.stop) {
-                    workflow_error(res, 503, "shutting_down", "worker admission closed");
-                    return;
-                }
-                size_t retained_workflows = 0;
-                for (const auto& item : manager.jobs)
-                    if (item.second->kind == AsyncJobKind::Workflow)
-                        ++retained_workflows;
-                if (retained_workflows >= 4 || count_pending_jobs(manager) >= manager.max_pending_jobs) {
-                    workflow_error(res, 429, "workflow_capacity", "workflow or job queue is full");
-                    return;
-                }
-                job->id = make_async_job_id(manager);
-                receipt = {{"id", job->id},
-                           {"kind", "workflow"},
-                           {"status", "queued"},
-                           {"created", job->created_at},
-                           {"poll_url", "/sdcpp/v1/jobs/" + job->id}};
-                manager.jobs.emplace(job->id, job);
-                try {
-                    manager.queue.push_back(job->id);
-                } catch (...) {
-                    manager.jobs.erase(job->id);
-                    throw;
-                }
+            // RuntimeRoutes::protect holds the shared model-transition lock
+            // through this single manager admission commit.
+            const AsyncJobAdmission receipt = admit_async_job(manager, job);
+            if (receipt.status != AsyncJobAdmissionStatus::Accepted) {
+                const bool stopping = receipt.status == AsyncJobAdmissionStatus::Stopping;
+                workflow_error(res, stopping ? 503 : 429,
+                               stopping ? "shutting_down" : "workflow_capacity",
+                               stopping ? "worker admission closed" : "workflow or job queue is full");
+                return;
             }
-            manager.cv.notify_one();
             res.status = 202;
-            res.set_content(receipt.dump(), "application/json");
+            res.set_content(receipt.receipt_json, "application/json");
         } catch (const json::parse_error& e) {
             workflow_error(res, 400, "invalid_json", e.what());
         } catch (const std::exception& e) {

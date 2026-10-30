@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 int64_t unix_timestamp_now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -89,6 +90,69 @@ std::string make_async_job_id(AsyncJobManager& manager) {
     oss << "job_" << std::hex << unix_timestamp_now_ms() << "_" << std::setw(8)
         << std::setfill('0') << manager.next_id++;
     return oss.str();
+}
+
+AsyncJobAdmission admit_async_job(AsyncJobManager& manager,
+                                  const std::shared_ptr<AsyncGenerationJob>& job) {
+    if (!job)
+        throw std::invalid_argument("async job admission requires a job owner");
+
+    AsyncJobAdmission admission;
+    {
+        std::unique_lock<std::mutex> lock(manager.mutex);
+        // Validate fields under the same lock as the worker's status writes;
+        // an accidental repeat admission must never race with the running job.
+        if (job->status != AsyncJobStatus::Queued || !job->id.empty() ||
+            job->cancel_requested.load()) {
+            throw std::invalid_argument("async job admission requires a fresh, uncancelled job");
+        }
+        purge_expired_jobs(manager);
+        if (manager.stop) {
+            admission.status = AsyncJobAdmissionStatus::Stopping;
+            return admission;
+        }
+        if (count_pending_jobs(manager) >= manager.max_pending_jobs) {
+            admission.status = AsyncJobAdmissionStatus::QueueFull;
+            return admission;
+        }
+        if (job->kind == AsyncJobKind::Workflow) {
+            size_t retained_workflows = 0;
+            for (const auto& existing : manager.jobs) {
+                if (existing.second->kind == AsyncJobKind::Workflow)
+                    ++retained_workflows;
+            }
+            if (retained_workflows >= 4) {
+                admission.status = AsyncJobAdmissionStatus::WorkflowFull;
+                return admission;
+            }
+        }
+
+        // This JSON is an immutable receipt of admission (not the mutable
+        // worker state). Format it before publishing any entry to the worker.
+        job->id = make_async_job_id(manager);
+        admission.receipt_json = json({
+            {"id", job->id},
+            {"kind", async_job_kind_name(job->kind)},
+            {"status", "queued"},
+            {"created", job->created_at},
+            {"poll_url", "/sdcpp/v1/jobs/" + job->id},
+        }).dump();
+
+        const auto insertion = manager.jobs.emplace(job->id, job);
+        if (!insertion.second) {
+            throw std::logic_error("duplicate async job id");
+        }
+        try {
+            manager.queue.push_back(job->id);
+        } catch (...) {
+            manager.jobs.erase(insertion.first);
+            throw;
+        }
+        admission.status = AsyncJobAdmissionStatus::Accepted;
+    }
+    // Never let the worker race with receipt preparation or registry publish.
+    manager.cv.notify_one();
+    return admission;
 }
 
 namespace { void release_generation_inputs(AsyncGenerationJob& job); }

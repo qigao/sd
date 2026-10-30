@@ -703,30 +703,18 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
             job->created_at                         = unix_timestamp_now_ms();
             job->img_gen                            = std::move(request);
 
-            {
-                std::lock_guard<std::mutex> lock(manager.mutex);
-                purge_expired_jobs(manager);
-                if (count_pending_jobs(manager) >= manager.max_pending_jobs) {
-                    res.status = 429;
-                    res.set_content(R"({"error":"job queue is full"})", "application/json");
-                    return;
-                }
-                job->id               = make_async_job_id(manager);
-                manager.jobs[job->id] = job;
-                manager.queue.push_back(job->id);
+            const AsyncJobAdmission receipt = admit_async_job(manager, job);
+            if (receipt.status != AsyncJobAdmissionStatus::Accepted) {
+                res.status = receipt.status == AsyncJobAdmissionStatus::Stopping ? 503 : 429;
+                res.set_content(
+                    receipt.status == AsyncJobAdmissionStatus::Stopping
+                        ? R"({"error":"worker admission closed"})"
+                        : R"({"error":"job queue is full"})",
+                    "application/json");
+                return;
             }
-
-            manager.cv.notify_one();
-
-            json out;
-            out["id"]       = job->id;
-            out["kind"]     = async_job_kind_name(job->kind);
-            out["status"]   = async_job_status_name(job->status);
-            out["created"]  = job->created_at;
-            out["poll_url"] = "/sdcpp/v1/jobs/" + job->id;
-
             res.status = 202;
-            res.set_content(out.dump(), "application/json");
+            res.set_content(receipt.receipt_json, "application/json");
         } catch (const json::parse_error& e) {
             res.status = 400;
             res.set_content(json({{"error", "invalid json"}, {"message", e.what()}}).dump(), "application/json");
@@ -765,30 +753,18 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
             job->created_at                         = unix_timestamp_now_ms();
             job->vid_gen                            = std::move(request);
 
-            {
-                std::lock_guard<std::mutex> lock(manager.mutex);
-                purge_expired_jobs(manager);
-                if (count_pending_jobs(manager) >= manager.max_pending_jobs) {
-                    res.status = 429;
-                    res.set_content(R"({"error":"job queue is full"})", "application/json");
-                    return;
-                }
-                job->id               = make_async_job_id(manager);
-                manager.jobs[job->id] = job;
-                manager.queue.push_back(job->id);
+            const AsyncJobAdmission receipt = admit_async_job(manager, job);
+            if (receipt.status != AsyncJobAdmissionStatus::Accepted) {
+                res.status = receipt.status == AsyncJobAdmissionStatus::Stopping ? 503 : 429;
+                res.set_content(
+                    receipt.status == AsyncJobAdmissionStatus::Stopping
+                        ? R"({"error":"worker admission closed"})"
+                        : R"({"error":"job queue is full"})",
+                    "application/json");
+                return;
             }
-
-            manager.cv.notify_one();
-
-            json out;
-            out["id"]       = job->id;
-            out["kind"]     = async_job_kind_name(job->kind);
-            out["status"]   = async_job_status_name(job->status);
-            out["created"]  = job->created_at;
-            out["poll_url"] = "/sdcpp/v1/jobs/" + job->id;
-
             res.status = 202;
-            res.set_content(out.dump(), "application/json");
+            res.set_content(receipt.receipt_json, "application/json");
         } catch (const json::parse_error& e) {
             res.status = 400;
             res.set_content(json({{"error", "invalid json"}, {"message", e.what()}}).dump(), "application/json");

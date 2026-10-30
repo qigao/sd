@@ -22,6 +22,10 @@
 | KFCore 节点、CatV2TON 网络 | 尚未实现；拒绝未知节点类型 |
 
 [Workflow V1 合同与测试层次](docs/workflow-v1.md) 说明已实现的本地工作流子集、控制依赖、参数范围、任务所有权与明确未实现的媒体边。  
+图像、视频及 Workflow 提交统一使用原子 `AsyncJobManager` 接纳与不可变 202 回执，
+默认 CI 的原生任务状态测试覆盖容量、并发接纳、取消/完成竞争与 TTL 回收。
+正式的 HTTP/2 用户身份、幂等提交及产物存储仍需 CHttp 接入。
+
 Workflow V1 真实权重验收可按 [本地 manifest 示例](tests/workflow-real-model-manifest.example.json)\n配置 `SD_APP_WORKFLOW_TEST_MANIFEST`。默认 CTest 不下载权重、不会把纯解析通过当成模型计算通过。\n\n[CHttp 服务设计](docs/chttp-service-design.md) 明确认证、任务提交、状态、取消、产物下载、
 WS 订阅、资源上限和共享 Service 能力缺口。文中的新接口是待实现契约，不是当前路由。
 原有 `/sdcpp/v1/*` 无模型基线测试不能证明新服务的认证或多用户隔离已完成。

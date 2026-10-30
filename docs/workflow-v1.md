@@ -111,6 +111,21 @@ RAII 清理才写 cancelled；中断不强行释放仍被 native 代码借用的
 节点异常形成 failed，不跳过关闭保护。没有模型时合法提案返回 503；
 不匹配的 recipe/revision/instance 返回 409；不支持 generation mode 或继承了 V1 不允许的默认参数返回 422。
 
+## 统一原子接纳与不可变回执
+
+`/sdcpp/v1/img_gen`、`/sdcpp/v1/vid_gen` 与
+`/sdcpp/v1/workflows` 现在共享 `admit_async_job()`，
+在 `AsyncJobManager.mutex` 下统一检查 shutdown、pending 容量与 Workflow
+保留数量。提交前构造一次不可变 202 回执，map 登记与 deque 入队作为一个原子
+提交点；入队分配失败将删除未发布的 registry 项。worker 只会在完整提交后
+被唤醒，HTTP 不再在通知 worker 后读取可变 `job.status`。
+
+原生并发测试包含 12 路争夺单个 pending 配额、全量队列/关闭拒绝、
+保留四个 Workflow 的上限、终态 TTL 腾出空间及重复接纳拒绝。
+这些测试证明**本进程中接纳和所有权的一致性**；由于尚未实现正式 CHttp
+的可信身份与 `client_request_id` 幂等索引，网络响应丢失之后的
+exactly-once/跨重启恢复依然不能保证。不得自动重发推理请求。
+
 ## Native Job Owner 终态验收
 
 生产队列、状态发布、取消/成功的原子仲裁、过期清理与 shutdown 取消

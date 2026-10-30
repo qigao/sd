@@ -75,6 +75,24 @@ struct AsyncJobManager {
 // Owned result payload, prepared outside the manager lock by the one native
 // worker. Tests may submit deterministic completion/failure payloads directly
 // to the *same* terminal state machine; no fake inference backend is installed.
+// Admission is a single ordered queue/map commit. The receipt body is
+// materialized before publication and never reads mutable job status after
+// wakeup; all 3 native submit routes must use this one owner.
+enum class AsyncJobAdmissionStatus {
+    Accepted,
+    Stopping,
+    QueueFull,
+    WorkflowFull,
+};
+
+struct AsyncJobAdmission {
+    AsyncJobAdmissionStatus status = AsyncJobAdmissionStatus::Stopping;
+    std::string receipt_json;
+};
+
+AsyncJobAdmission admit_async_job(AsyncJobManager& manager,
+                                  const std::shared_ptr<AsyncGenerationJob>& job);
+
 struct AsyncJobCompletion {
     bool success = false;
     std::vector<std::string> result_images_b64;

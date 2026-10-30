@@ -5,7 +5,6 @@
 #include <chrono>
 #include <memory>
 #include <string>
-#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -215,49 +214,138 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         purge_expired_jobs(manager);
         check_true(manager.expired_jobs.find(finished->id) == manager.expired_jobs.end());
     }
-    it("keeps terminal payload readable after registry expiry without manager lock")
+    it("commits a single immutable receipt before the worker can advance")
     {
         AsyncJobManager manager;
-        std::shared_ptr<AsyncGenerationJob> lease;
+        auto job = std::make_shared<AsyncGenerationJob>();
+        job->kind = AsyncJobKind::VidGen;
+        const AsyncJobAdmission receipt = admit_async_job(manager, job);
+        check_true(receipt.status == AsyncJobAdmissionStatus::Accepted);
+        const json published = json::parse(receipt.receipt_json);
+        check_equal(published["id"].get<std::string>(), job->id);
+        check_equal(published["kind"].get<std::string>(), std::string("vid_gen"));
+        check_equal(published["status"].get<std::string>(), std::string("queued"));
+        check_equal(published["poll_url"].get<std::string>(),
+                    std::string("/sdcpp/v1/jobs/") + job->id);
         {
             std::lock_guard<std::mutex> lock(manager.mutex);
-            lease = enqueue(manager, AsyncJobKind::Workflow);
-            check_true(start_next_async_job(manager) == lease);
-            lease->workflow_node_states = {"completed", "completed"};
-            AsyncJobCompletion output = successful_output();
-            output.result_workflow = {{"version", 1},
-                                      {"payload", std::string(128 * 1024, 'a')}};
-            check_true(finish_async_job(manager, *lease, std::move(output)));
-            lease->completed_at = unix_timestamp_now_ms() -
-                (manager.completed_ttl_seconds + 2) * 1000;
-            purge_expired_jobs(manager);
-            check_true(manager.jobs.find(lease->id) == manager.jobs.end());
-            check_true(manager.expired_jobs.find(lease->id) != manager.expired_jobs.end());
+            check_true(start_next_async_job(manager) == job);
+            check_true(finish_async_job(manager, *job, successful_output()));
+            check_true(job->status == AsyncJobStatus::Completed);
         }
-        // No manager lock is held. Data must remain immutable and available
-        // until the reader's shared_ptr lease is retired.
-        const json terminal = make_async_terminal_job_json(*lease);
-        check_true(terminal["status"] == "completed");
-        check_true(terminal["error"].is_null());
-        check_equal(terminal["result"]["payload"].get<std::string>().size(),
-                    static_cast<size_t>(128 * 1024));
+        // The caller's 202 body can never change to 'generating' or 'completed'.
+        check_equal(json::parse(receipt.receipt_json)["status"].get<std::string>(),
+                    std::string("queued"));
     }
 
-    it("rejects unlocked snapshot reads from non-terminal jobs")
+    it("rejects stopped and full admissions without publishing a job")
     {
         AsyncJobManager manager;
-        std::shared_ptr<AsyncGenerationJob> job;
+        manager.max_pending_jobs = 0;
+        auto waiting = std::make_shared<AsyncGenerationJob>();
+        auto blocked = admit_async_job(manager, waiting);
+        check_true(blocked.status == AsyncJobAdmissionStatus::QueueFull);
+        check_true(blocked.receipt_json.empty());
+        check_true(waiting->id.empty());
         {
             std::lock_guard<std::mutex> lock(manager.mutex);
-            job = enqueue(manager, AsyncJobKind::Workflow);
+            check_true(manager.jobs.empty());
+            check_true(manager.queue.empty());
+            manager.max_pending_jobs = 2;
         }
+        stop_async_job_worker(manager);
+        waiting = std::make_shared<AsyncGenerationJob>();
+        blocked = admit_async_job(manager, waiting);
+        check_true(blocked.status == AsyncJobAdmissionStatus::Stopping);
+        check_true(waiting->id.empty());
+        check_true(manager.jobs.empty());
+    }
+
+    it("caps retained workflows independently of available pending slots")
+    {
+        AsyncJobManager manager;
+        manager.max_pending_jobs = 64;
+        std::vector<std::shared_ptr<AsyncGenerationJob>> admitted;
+        for (int i = 0; i < 4; ++i) {
+            auto job = std::make_shared<AsyncGenerationJob>();
+            job->kind = AsyncJobKind::Workflow;
+            auto receipt = admit_async_job(manager, job);
+            check_true(receipt.status == AsyncJobAdmissionStatus::Accepted);
+            admitted.push_back(job);
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            check_true(cancel_queued_job(manager, *job));
+        }
+        auto fifth = std::make_shared<AsyncGenerationJob>();
+        fifth->kind = AsyncJobKind::Workflow;
+        auto rejected = admit_async_job(manager, fifth);
+        check_true(rejected.status == AsyncJobAdmissionStatus::WorkflowFull);
+        check_true(fifth->id.empty());
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            check_equal(manager.queue.size(), static_cast<size_t>(0));
+            check_equal(manager.jobs.size(), static_cast<size_t>(4));
+            admitted[0]->completed_at = unix_timestamp_now_ms() -
+                (manager.failed_ttl_seconds + 2) * 1000;
+        }
+        const auto accepted = admit_async_job(manager, fifth);
+        check_true(accepted.status == AsyncJobAdmissionStatus::Accepted);
+        check_false(fifth->id.empty());
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        check_true(manager.jobs.find(admitted[0]->id) == manager.jobs.end());
+        check_equal(manager.jobs.size(), static_cast<size_t>(4));
+    }
+
+    it("admits at most one job under concurrent capacity contention")
+    {
+        AsyncJobManager manager;
+        manager.max_pending_jobs = 1;
+        constexpr int contenders = 12;
+        std::atomic<int> started{0};
+        std::atomic<int> accepted{0};
+        std::atomic<int> rejected{0};
+        std::vector<std::thread> workers;
+        workers.reserve(contenders);
+        for (int i = 0; i < contenders; ++i) {
+            workers.emplace_back([&] {
+                auto job = std::make_shared<AsyncGenerationJob>();
+                job->kind = AsyncJobKind::ImgGen;
+                started.fetch_add(1);
+                while (started.load() < contenders) std::this_thread::yield();
+                const auto result = admit_async_job(manager, job);
+                if (result.status == AsyncJobAdmissionStatus::Accepted)
+                    accepted.fetch_add(1);
+                else if (result.status == AsyncJobAdmissionStatus::QueueFull)
+                    rejected.fetch_add(1);
+            });
+        }
+        for (auto& thread : workers) thread.join();
+        check_equal(accepted.load(), 1);
+        check_equal(rejected.load(), contenders - 1);
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        check_equal(manager.jobs.size(), static_cast<size_t>(1));
+        check_equal(manager.queue.size(), static_cast<size_t>(1));
+        const auto it = manager.jobs.find(manager.queue.front());
+        check_true(it != manager.jobs.end());
+        if (it != manager.jobs.end())
+            check_true(it->second->status == AsyncJobStatus::Queued);
+    }
+
+    it("refuses re-admission of an already published job object")
+    {
+        AsyncJobManager manager;
+        auto job = std::make_shared<AsyncGenerationJob>();
+        const auto first = admit_async_job(manager, job);
+        check_true(first.status == AsyncJobAdmissionStatus::Accepted);
         bool rejected = false;
         try {
-            (void)make_async_terminal_job_json(*job);
-        } catch (const std::logic_error&) {
+            (void)admit_async_job(manager, job);
+        } catch (const std::invalid_argument&) {
             rejected = true;
         }
         check_true(rejected);
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        check_equal(manager.jobs.size(), static_cast<size_t>(1));
+        check_equal(manager.queue.size(), static_cast<size_t>(1));
     }
 
 }
