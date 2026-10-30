@@ -60,17 +60,16 @@ static void preview_callback(int step, int frame_count, sd_image_t* frames, bool
     // an otherwise valid generation. Preview is best-effort, not an output.
     try {
         const sd_preview_info_t info = sd_get_preview_info();
-        auto image_bytes = encode_image_to_vector(EncodedImageFormat::PNG,
-                                                   frame.data,
-                                                   frame.width,
-                                                   frame.height,
-                                                   frame.channel,
-                                                   "",
-                                                   80);
-        if (image_bytes.empty() || image_bytes.size() > k_sd_app_preview_max_png_bytes)
+        std::string encoded;
+        if (!sd_app_try_encode_preview(
+                frame,
+                [](const sd_image_t& image) {
+                    return encode_image_to_vector(EncodedImageFormat::PNG,
+                                                  image.data, image.width, image.height,
+                                                  image.channel, "", 80);
+                },
+                [](const auto& bytes) { return base64_encode(bytes); }, encoded))
             return;
-
-        std::string encoded = base64_encode(image_bytes);
         auto* job = static_cast<AsyncGenerationJob*>(data);
         std::lock_guard<std::mutex> lock(job->preview_mutex);
         job->preview_b64 = std::move(encoded);

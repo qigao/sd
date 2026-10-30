@@ -14,6 +14,7 @@
 #include "common/media_io.h"
 #include "common/resource_owners.hpp"
 #include "model_catalog.h"
+#include "preview_limits.h"
 
 namespace fs = std::filesystem;
 
@@ -502,31 +503,33 @@ static SDAPIPreviewState g_preview;
 static void preview_callback(int step, int frame_count, sd_image_t* frames, bool is_noisy, void* data) {
     (void)is_noisy;
     (void)data;
-    if (frame_count <= 0 || frames == nullptr || frames[0].data == nullptr) {
+    if (frame_count <= 0 || frames == nullptr || frames[0].data == nullptr)
         return;
+    const sd_image_t& frame = frames[0];
+
+    // Same bounded media/exception boundary as the owned async worker.
+    // JPEG preview is best-effort; no codec exception may cross sd.cpp C ABI.
+    try {
+        const sd_preview_info_t info = sd_get_preview_info();
+        std::string encoded;
+        if (!sd_app_try_encode_preview(
+                frame,
+                [](const sd_image_t& image) {
+                    return encode_image_to_vector(EncodedImageFormat::JPEG,
+                                                  image.data, image.width, image.height,
+                                                  image.channel, "", 80);
+                },
+                [](const auto& bytes) { return base64_encode(bytes); }, encoded))
+            return;
+        std::lock_guard<std::mutex> lock(g_preview.mutex);
+        g_preview.b64    = std::move(encoded);
+        g_preview.step   = static_cast<int>(std::min<int64_t>(
+            step < 0 ? -static_cast<int64_t>(step) : step, std::max(0, info.total_steps)));
+        g_preview.total  = std::max(0, info.total_steps);
+        g_preview.job_no = std::max(0, info.sample_pass - 1);
+    } catch (...) {
+        // Preview failure must not abort a real native generation.
     }
-
-    const sd_image_t& frame      = frames[0];
-    const sd_preview_info_t info = sd_get_preview_info();
-
-    auto image_bytes = encode_image_to_vector(EncodedImageFormat::JPEG,
-                                              frame.data,
-                                              frame.width,
-                                              frame.height,
-                                              frame.channel,
-                                              "",
-                                              80);
-    if (image_bytes.empty()) {
-        return;
-    }
-
-    std::string b64 = base64_encode(image_bytes);
-    std::lock_guard<std::mutex> lock(g_preview.mutex);
-    g_preview.b64    = std::move(b64);
-    g_preview.step   = static_cast<int>(std::min<int64_t>(step < 0 ? -static_cast<int64_t>(step) : step,
-                                                          std::max(0, info.total_steps)));
-    g_preview.total  = std::max(0, info.total_steps);
-    g_preview.job_no = std::max(0, info.sample_pass - 1);
 }
 
 struct SDAPIPreviewGuard {
@@ -603,8 +606,15 @@ void register_sdapi_endpoints(httplib::Server& svr, ServerRuntime& rt) {
                 const bool detailing = request.adetailer_enabled && !runtime->default_gen_params->ad_model_path.empty();
                 SDAPIPreviewGuard preview_guard(id_task, img_gen_params, img2img ? "img2img" : "txt2img", detailing);
                 sd_image_generation_result_t* generated = nullptr;
-                generate_image(runtime->sd_ctx, &img_gen_params, &generated);
+                const bool generated_ok = generate_image(runtime->sd_ctx, &img_gen_params, &generated);
+                // A failed native call may leave partial output. The result
+                // owner must retire it without publishing HTTP success.
                 results.adopt(generated, runtime->ctx_params->lora_model_dir);
+                if (!generated_ok) {
+                    res.status = 500;
+                    res.set_content(R"({"error":"generate_image failed"})", "application/json");
+                    return;
+                }
                 num_results = results.count();
                 if (detailing && !results.empty())
                     preview_guard.begin_detailing();

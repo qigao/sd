@@ -1,4 +1,5 @@
 #include "async_jobs.h"
+#include "common/media_io.h"
 #include "preview_limits.h"
 #include "tinytest.hpp"
 
@@ -7,6 +8,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -660,6 +662,99 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         check_true(terminal["result"].is_null());
         check_equal(terminal["error"]["code"].get<std::string>(),
                     std::string("cancelled"));
+    }
+
+    it("encodes real PNG and JPEG native previews under one bounded codec contract")
+    {
+        std::uint8_t pixels[] = {255, 0, 0};
+        sd_image_t frame{1, 1, 3, pixels};
+        auto printable = [](const auto& bytes) {
+            return std::string(bytes.size(), 'B');
+        };
+        const auto encode_png = [](const sd_image_t& image) {
+            return encode_image_to_vector(EncodedImageFormat::PNG, image.data,
+                                          image.width, image.height, image.channel,
+                                          "", 80);
+        };
+        const auto encode_jpeg = [](const sd_image_t& image) {
+            return encode_image_to_vector(EncodedImageFormat::JPEG, image.data,
+                                          image.width, image.height, image.channel,
+                                          "", 80);
+        };
+        std::string rendered;
+        check_true(sd_app_try_encode_preview(frame, encode_png, printable, rendered));
+        check_true(!rendered.empty());
+        const auto png_bytes = encode_png(frame);
+        check_true(!png_bytes.empty());
+        check_equal(rendered.size(), png_bytes.size());
+        check_true(sd_app_try_encode_preview(frame, encode_jpeg, printable, rendered));
+        check_true(!rendered.empty());
+        const auto jpeg_bytes = encode_jpeg(frame);
+        check_true(!jpeg_bytes.empty());
+        check_equal(rendered.size(), jpeg_bytes.size());
+    }
+
+    it("does not publish media when a preview codec or serializer throws")
+    {
+        std::uint8_t pixels[] = {255, 0, 0};
+        sd_image_t frame{1, 1, 3, pixels};
+        std::string previous = "previous-preview";
+        const auto encoder = [](const sd_image_t&) {
+            return std::vector<std::uint8_t>{1, 2, 3};
+        };
+        const auto converter = [](const auto&) {
+            return std::string("encoded");
+        };
+        const auto throwing_encoder = [](const sd_image_t&) -> std::vector<std::uint8_t> {
+            throw std::runtime_error("injected codec exception");
+        };
+        const auto throwing_converter = [](const auto&) -> std::string {
+            throw std::bad_alloc();
+        };
+        check_false(sd_app_try_encode_preview(frame, throwing_encoder,
+                                              converter, previous));
+        check_equal(previous, std::string("previous-preview"));
+        check_false(sd_app_try_encode_preview(frame, encoder,
+                                              throwing_converter, previous));
+        check_equal(previous, std::string("previous-preview"));
+        auto invalid = frame;
+        invalid.width = 0;
+        bool called = false;
+        const auto would_encode = [&](const sd_image_t&) {
+            called = true;
+            return std::vector<std::uint8_t>{1, 2, 3};
+        };
+        check_false(sd_app_try_encode_preview(invalid, would_encode,
+                                              converter, previous));
+        check_false(called);
+        check_equal(previous, std::string("previous-preview"));
+    }
+
+    it("rejects an over-budget PNG/JPEG payload or base64 preview atomically")
+    {
+        std::uint8_t pixels[] = {1, 2, 3};
+        sd_image_t frame{1, 1, 3, pixels};
+        std::string retained = "old";
+        const auto normal_converter = [](const auto&) {
+            return std::string("b64");
+        };
+        const auto oversized_encoder = [](const sd_image_t&) {
+            return std::vector<std::uint8_t>(
+                static_cast<size_t>(k_sd_app_preview_max_encoded_bytes + 1), 1);
+        };
+        check_false(sd_app_try_encode_preview(frame, oversized_encoder,
+                                              normal_converter, retained));
+        check_equal(retained, std::string("old"));
+        const auto small_encoder = [](const sd_image_t&) {
+            return std::vector<std::uint8_t>{1, 2, 3};
+        };
+        const auto oversized_b64 = [](const auto&) {
+            return std::string(
+                static_cast<size_t>(k_sd_app_preview_max_base64_bytes + 1), 'X');
+        };
+        check_false(sd_app_try_encode_preview(frame, small_encoder,
+                                              oversized_b64, retained));
+        check_equal(retained, std::string("old"));
     }
 
 }

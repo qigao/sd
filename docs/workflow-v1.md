@@ -118,10 +118,14 @@ Workflow V1 同时退休原始 prompt/negative_prompt、节点参数、依赖边
   更不能替代将来 CHttp 的 streaming input/memory quota。
 
 服务关闭时停止新准入、取消排队中的任务并请求中断运行中任务，worker join 后再释放 context。
-原生预览回调现在被限制为不超过 4 MiPixels 的合法像素维度与 8 MiB PNG 编码输出；
-编码/分配失败会丢弃当次预览，绝不使异常越过 sd.cpp C ABI 回调边界。
-这一限额只影响可选预览，不截断正常推理输出；原生 CTest 验证边界计算，
-真实 callback 运行仍须实际模型门禁。
+原生异步 worker 和旧 SDAPI 同步预览回调现在使用同一个
+`sd_app_try_encode_preview()` 边界：至多 4 MiPixels、8 MiB PNG/JPEG
+编码字节及对应有界 base64，且像素/编码/转换失败不更改已发布的预览。
+编码器/分配器异常均在 sd.cpp C ABI 回调内部截获，不可跨越 native ABI；
+这只限制可选预览，不截断正常推理。原生 CTest 使用实际 PNG/JPEG
+编码器及注入的编码/序列化故障验证边界，真实模型 callback 仍需 Issue #2。
+旧 SDAPI/OpenAI 同步 `generate_image()` 现在尊重 C API 的 bool 返回值：
+即使失败时残留部分原生图像，所有权仍由 RAII 清理，不能发布 HTTP 成功。
 
 取消运行节点时现有 sd.cpp monitor 请求取消，但仍需等待其真实计算和结果
 RAII 清理才写 cancelled；中断不强行释放仍被 native 代码借用的 context。

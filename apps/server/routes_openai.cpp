@@ -224,8 +224,12 @@ static bool execute_sync_img_gen_request(ServerRuntime& runtime,
     {
         std::lock_guard<std::mutex> lock(*runtime.sd_ctx_mutex);
         sd_image_generation_result_t* generated = nullptr;
-        generate_image(runtime.sd_ctx, &img_gen_params, &generated);
+        const bool generated_ok = generate_image(runtime.sd_ctx, &img_gen_params, &generated);
         results.adopt(generated, runtime.ctx_params->lora_model_dir);
+        if (!generated_ok) {
+            error_message = "generate_image failed";
+            return false; // Never expose native partial results as HTTP success.
+        }
         num_results = results.count();
         if (!results.empty() && !apply_server_adetailer(runtime, request, img_gen_params, results)) {
             error_message = "ADetailer failed";
