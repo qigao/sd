@@ -311,20 +311,104 @@ std::shared_ptr<AsyncGenerationJob> start_next_async_job(AsyncJobManager& manage
 }
 
 namespace {
-void release_generation_inputs(AsyncGenerationJob& job) {
-    // Do not retain decoded input pixels or source media for the result TTL.
-    // Only the small output_format is needed for completed job serialization.
-    if (job.kind == AsyncJobKind::ImgGen) {
-        ImgGenJobRequest empty;
-        empty.output_format = std::move(job.img_gen.output_format);
-        job.img_gen = std::move(empty);
-    } else if (job.kind == AsyncJobKind::VidGen) {
-        VidGenJobRequest empty;
-        empty.output_format = std::move(job.vid_gen.output_format);
-        job.vid_gen = std::move(empty);
-    } else if (job.kind == AsyncJobKind::Workflow) {
-        job.img_gen = ImgGenJobRequest{};
+// Terminal publication runs under manager.mutex; it must not allocate merely
+// to release request resources. All sd.cpp callback and parameter borrows have
+// unwound before this point. The output format is the only request property
+// still needed by image/video result serialization.
+void retire_text(std::string& text) noexcept {
+    std::string empty;
+    text.swap(empty);
+}
+
+template <typename T>
+void retire_vector(std::vector<T>& items) noexcept {
+    std::vector<T> empty;
+    items.swap(empty);
+}
+
+void retire_generation_params(SDGenerationParams& params) noexcept {
+    // Retire raw views before destroying their owning image/audio buffers.
+    retire_vector(params.lora_vec);
+    retire_vector(params.ref_image_views);
+    retire_vector(params.ref_video_frame_views);
+    retire_vector(params.ref_video_views);
+    retire_vector(params.ref_audio_views);
+    retire_vector(params.pm_id_image_views);
+    retire_vector(params.control_frame_views);
+
+    params.init_image.reset();
+    params.end_image.reset();
+    params.mask_image.reset();
+    params.control_image.reset();
+    params.ip_adapter_image.reset();
+    retire_vector(params.ref_images);
+    retire_vector(params.ref_videos);
+    retire_vector(params.ref_video_audios);
+    retire_vector(params.ref_audios);
+    retire_vector(params.pm_id_images);
+    retire_vector(params.control_frames);
+
+    retire_vector(params.ref_image_paths);
+    retire_vector(params.ref_video_paths);
+    retire_vector(params.ref_video_audio_paths);
+    retire_vector(params.ref_audio_paths);
+    retire_vector(params.skip_layers);
+    retire_vector(params.high_noise_skip_layers);
+    retire_vector(params.custom_sigmas);
+    retire_vector(params.hires_custom_sigmas);
+
+    params.lora_map.clear();
+    params.high_noise_lora_map.clear();
+
+    for (std::string* value : {
+        &params.prompt, &params.negative_prompt, &params.ad_model_path,
+        &params.ad_prompt, &params.ad_negative_prompt, &params.extra_ad_args,
+        &params.init_image_path, &params.end_image_path, &params.mask_image_path,
+        &params.control_image_path, &params.ip_adapter_image_path,
+        &params.control_video_path, &params.extra_sample_args,
+        &params.high_noise_extra_sample_args, &params.cache_mode,
+        &params.cache_option, &params.scm_mask, &params.extra_tiling_args,
+        &params.ref_image_args, &params.image_preprocess, &params.pm_id_images_dir,
+        &params.pm_id_embed_path, &params.pulid_id_embedding_path,
+        &params.hires_upscaler, &params.hires_upscaler_model_path,
+        &params.prompt_with_lora
+    }) {
+        retire_text(*value);
     }
+    // Do not leave pointer views dangling inside a retained terminal object.
+    params.sample_params.guidance.slg.layers = nullptr;
+    params.sample_params.guidance.slg.layer_count = 0;
+    params.high_noise_sample_params.guidance.slg.layers = nullptr;
+    params.high_noise_sample_params.guidance.slg.layer_count = 0;
+    params.sample_params.custom_sigmas = nullptr;
+    params.sample_params.custom_sigmas_count = 0;
+    params.high_noise_sample_params.custom_sigmas = nullptr;
+    params.high_noise_sample_params.custom_sigmas_count = 0;
+    params.sample_params.extra_sample_args = nullptr;
+    params.high_noise_sample_params.extra_sample_args = nullptr;
+    params.vae_tiling_params.extra_tiling_args = nullptr;
+    params.cache_params.scm_mask = nullptr;
+}
+
+void release_generation_inputs(AsyncGenerationJob& job) noexcept {
+    if (job.kind == AsyncJobKind::Workflow) {
+        // Terminal status exposes only node IDs, node states and result JSON.
+        // Free the original prompts, parameters, model binding and DAG edges
+        // rather than retaining the entire request for the 10-minute job TTL.
+        for (auto& node : job.workflow.nodes) {
+            node.parameters.clear();
+            retire_vector(node.dependencies);
+        }
+        retire_vector(job.workflow.order);
+        retire_vector(job.workflow.outputs);
+        retire_text(job.workflow.model_recipe);
+        retire_text(job.workflow.model_instance);
+    }
+    retire_generation_params(job.img_gen.gen_params);
+    retire_generation_params(job.vid_gen.gen_params);
+    retire_vector(job.img_gen.adetailer_passes);
+    retire_text(job.img_gen.preview_mode);
+    retire_text(job.vid_gen.preview_mode);
 }
 
 void clear_outputs(AsyncGenerationJob& job) {

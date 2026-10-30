@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <thread>
@@ -355,6 +356,120 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         std::lock_guard<std::mutex> lock(manager.mutex);
         check_equal(manager.jobs.size(), static_cast<size_t>(1));
         check_equal(manager.queue.size(), static_cast<size_t>(1));
+    }
+
+
+    it("retires all Workflow V1 node params and DAG inputs after queued cancellation")
+    {
+        TestAsyncJobManager manager;
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        auto job = enqueue(manager, AsyncJobKind::Workflow);
+        job->workflow.model_recipe = "checkpoint-with-private-path";
+        job->workflow.model_instance = manager.instance_id;
+        job->workflow.order = {0, 1};
+        job->workflow.outputs = {1};
+        job->workflow.nodes[0].parameters = {
+            {"prompt", std::string(2048, 'p')},
+            {"negative_prompt", std::string(2048, 'n')},
+            {"width", 128}, {"height", 128}, {"steps", 2},
+        };
+        job->workflow.nodes[1].parameters = {
+            {"prompt", std::string(2048, 'q')},
+            {"width", 128}, {"height", 128}, {"steps", 2},
+        };
+        job->workflow.nodes[1].dependencies = {0};
+        job->img_gen.gen_params.prompt = std::string(2048, 'w');
+        check_true(cancel_queued_job(manager, *job));
+        check_true(job->status == AsyncJobStatus::Cancelled);
+        check_true(job->workflow.model_recipe.empty());
+        check_true(job->workflow.model_instance.empty());
+        check_true(job->workflow.order.empty());
+        check_true(job->workflow.outputs.empty());
+        check_true(job->workflow.nodes[0].parameters.empty());
+        check_true(job->workflow.nodes[1].parameters.empty());
+        check_true(job->workflow.nodes[1].dependencies.empty());
+        check_true(job->img_gen.gen_params.prompt.empty());
+        const json terminal = make_async_job_json(manager, *job);
+        check_equal(terminal["nodes"][0]["id"].get<std::string>(), std::string("first"));
+        check_equal(terminal["nodes"][1]["id"].get<std::string>(), std::string("second"));
+        check_equal(terminal["nodes"][0]["status"].get<std::string>(), std::string("skipped"));
+        check_true(terminal["result"].is_null());
+    }
+
+    it("drops old Workflow V1 payloads after success and failure without changing snapshots")
+    {
+        for (bool success : {false, true}) {
+            TestAsyncJobManager manager;
+            std::shared_ptr<AsyncGenerationJob> job;
+            {
+                std::lock_guard<std::mutex> lock(manager.mutex);
+                job = enqueue(manager, AsyncJobKind::Workflow);
+                job->workflow.nodes[0].parameters = {
+                    {"prompt", std::string(2048, 'x')},
+                    {"width", 128}, {"height", 128}, {"steps", 2},
+                };
+                job->workflow.order = {0, 1};
+                job->workflow.model_recipe = "private-recipe";
+                check_true(start_next_async_job(manager) == job);
+                job->workflow_node_states = {"completed", success ? "completed" : "running"};
+                AsyncJobCompletion outcome = successful_output();
+                outcome.success = success;
+                outcome.error_message = success ? "" : "injected failure";
+                check_true(finish_async_job(manager, *job, std::move(outcome)));
+                check_true(job->workflow.nodes[0].parameters.empty());
+                check_true(job->workflow.order.empty());
+                check_true(job->workflow.model_recipe.empty());
+            }
+            const json snapshot = make_async_terminal_job_json(*job);
+            check_equal(snapshot["nodes"].size(), static_cast<size_t>(2));
+            check_equal(snapshot["nodes"][0]["id"].get<std::string>(), std::string("first"));
+            if (success) {
+                check_equal(snapshot["result"]["version"].get<int>(), 1);
+                check_true(snapshot["error"].is_null());
+            } else {
+                check_true(snapshot["result"].is_null());
+                check_equal(snapshot["nodes"][1]["status"].get<std::string>(),
+                            std::string("failed"));
+            }
+        }
+    }
+
+    it("retires image and video decode inputs without allocating new default requests")
+    {
+        for (AsyncJobKind kind : {AsyncJobKind::ImgGen, AsyncJobKind::VidGen}) {
+            TestAsyncJobManager manager;
+            std::shared_ptr<AsyncGenerationJob> job;
+            {
+                std::lock_guard<std::mutex> lock(manager.mutex);
+                job = enqueue(manager, kind);
+                auto& request = kind == AsyncJobKind::ImgGen
+                    ? job->img_gen.gen_params : job->vid_gen.gen_params;
+                request.prompt = std::string(2048, 's');
+                request.negative_prompt = std::string(2048, 'n');
+                request.ref_image_paths = {"an-old-upload.png"};
+                request.ref_audio_paths = {"an-old-audio.wav"};
+                request.init_image.reset({1, 1, 3,
+                    static_cast<uint8_t*>(std::malloc(3))});
+                check_true(request.init_image.get().data != nullptr);
+                request.lora_map["private-lora"] = 1.0f;
+                request.extra_sample_args = "private-args";
+                check_true(start_next_async_job(manager) == job);
+                check_true(finish_async_job(manager, *job, successful_output()));
+                check_true(job->status == AsyncJobStatus::Completed);
+                check_true(request.prompt.empty());
+                check_true(request.negative_prompt.empty());
+                check_true(request.ref_image_paths.empty());
+                check_true(request.ref_audio_paths.empty());
+                check_true(request.lora_map.empty());
+                check_true(request.extra_sample_args.empty());
+                check_true(request.skip_layers.empty());
+                check_true(request.init_image.get().data == nullptr);
+            }
+            const json terminal = make_async_terminal_job_json(*job);
+            check_equal(terminal["status"].get<std::string>(), std::string("completed"));
+            check_true(terminal["error"].is_null());
+            check_true(!terminal["result"].is_null());
+        }
     }
 
     it("bounds native preview frame allocation without restricting generation")

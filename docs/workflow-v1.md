@@ -101,6 +101,14 @@ manager.mutex 下的读写；终态发布后不再执行下一节点。
 - 成功结果中被选择的 PNG base64 与 generation metadata 合计最高 8 MiB，
   超出时显式失败并不发布部分结果。现阶段通过**原有** job status
   JSON 返回这段有界媒体，尚不是 CHttp artifact/streaming endpoint。
+- 任务达到 Completed/Failed/Cancelled 或被排队取消时，生产终态 owner 释放
+图像/视频的输入像素、音频、引用媒体、LoRA/缓存参数和临时指针视图，不再通过
+重新构造完整 `SDGenerationParams` 在 `manager.mutex` 内分配内存。
+Workflow V1 同时退休原始 prompt/negative_prompt、节点参数、依赖边与拓扑数组，
+但保留节点 ID、终态状态和已经发布的结果 JSON，保证查询合同不变。
+没有执行中的 sd.cpp 调用会在这些资源退休后继续借用它们。
+原生测试直接检查三类任务在成功、失败和排队取消后不再保存输入与 DAG。
+
 - 终态成功/失败/取消后的字段不可变。HTTP 查询/取消先在 manager 锁内取得
   `shared_ptr` reader lease，再在锁外构建终态 JSON；TTL 可从 registry 清除该任务，
   但在途 reader 的媒体不会被提前释放。排队/运行状态仍须加锁读取。
