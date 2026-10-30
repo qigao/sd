@@ -800,76 +800,88 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
 
     routes.get(R"(/sdcpp/v1/jobs/([A-Za-z0-9_\-]+))", [runtime](const httplib::Request& req, httplib::Response& res) {
         AsyncJobManager& manager = *runtime->async_job_manager;
-        std::lock_guard<std::mutex> lock(manager.mutex);
-        purge_expired_jobs(manager);
-
-        std::string job_id = req.matches[1];
-        auto it            = manager.jobs.find(job_id);
-        if (it == manager.jobs.end()) {
-            if (manager.expired_jobs.find(job_id) != manager.expired_jobs.end()) {
-                res.status = 410;
-                res.set_content(R"({"error":"job expired"})", "application/json");
-            } else {
-                res.status = 404;
-                res.set_content(R"({"error":"job not found"})", "application/json");
+        std::shared_ptr<AsyncGenerationJob> terminal_lease;
+        json snapshot;
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            purge_expired_jobs(manager);
+            const std::string job_id = req.matches[1];
+            const auto it = manager.jobs.find(job_id);
+            if (it == manager.jobs.end()) {
+                if (manager.expired_jobs.find(job_id) != manager.expired_jobs.end()) {
+                    res.status = 410;
+                    res.set_content(R"({"error":"job expired"})", "application/json");
+                } else {
+                    res.status = 404;
+                    res.set_content(R"({"error":"job not found"})", "application/json");
+                }
+                return;
             }
-            return;
+            if (it->second->kind == AsyncJobKind::Workflow &&
+                !workflow_local_request_allowed(req, *runtime->svr_params)) {
+                res.status = 403;
+                res.set_content(R"({"code":"workflow_local_only","error":"direct loopback request required"})", "application/json");
+                return;
+            }
+            if (it->second->status == AsyncJobStatus::Completed ||
+                it->second->status == AsyncJobStatus::Failed ||
+                it->second->status == AsyncJobStatus::Cancelled) {
+                terminal_lease = it->second;
+            } else {
+                snapshot = make_async_job_json(manager, *it->second);
+            }
         }
-
-        if (it->second->kind == AsyncJobKind::Workflow &&
-            !workflow_local_request_allowed(req, *runtime->svr_params)) {
-            res.status = 403;
-            res.set_content(R"({"code":"workflow_local_only","error":"direct loopback request required"})", "application/json");
-            return;
-        }
+        // Large immutable base64 results are copied/encoded outside the queue
+        // lock. The job's shared_ptr keeps results alive past registry expiry.
+        if (terminal_lease)
+            snapshot = make_async_terminal_job_json(*terminal_lease);
         res.status = 200;
-        res.set_content(make_async_job_json(manager, *it->second).dump(), "application/json");
+        res.set_content(snapshot.dump(), "application/json");
     });
 
     routes.post(R"(/sdcpp/v1/jobs/([A-Za-z0-9_\-]+)/cancel)", [runtime](const httplib::Request& req, httplib::Response& res) {
         AsyncJobManager& manager = *runtime->async_job_manager;
-        std::lock_guard<std::mutex> lock(manager.mutex);
-        purge_expired_jobs(manager);
-
-        std::string job_id = req.matches[1];
-        auto it            = manager.jobs.find(job_id);
-        if (it == manager.jobs.end()) {
-            if (manager.expired_jobs.find(job_id) != manager.expired_jobs.end()) {
-                res.status = 410;
-                res.set_content(R"({"error":"job expired"})", "application/json");
-            } else {
-                res.status = 404;
-                res.set_content(R"({"error":"job not found"})", "application/json");
-            }
-            return;
-        }
-
-        auto& job = *it->second;
-        if (job.kind == AsyncJobKind::Workflow &&
-            !workflow_local_request_allowed(req, *runtime->svr_params)) {
-            res.status = 403;
-            res.set_content(R"({"code":"workflow_local_only","error":"direct loopback request required"})", "application/json");
-            return;
-        }
-        if (job.status == AsyncJobStatus::Queued) {
-            if (!cancel_queued_job(manager, job)) {
-                res.status = 409;
-                res.set_content(R"({"error":"job queue state changed before cancellation"})", "application/json");
+        std::shared_ptr<AsyncGenerationJob> terminal_lease;
+        json snapshot;
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            purge_expired_jobs(manager);
+            const std::string job_id = req.matches[1];
+            const auto it = manager.jobs.find(job_id);
+            if (it == manager.jobs.end()) {
+                if (manager.expired_jobs.find(job_id) != manager.expired_jobs.end()) {
+                    res.status = 410;
+                    res.set_content(R"({"error":"job expired"})", "application/json");
+                } else {
+                    res.status = 404;
+                    res.set_content(R"({"error":"job not found"})", "application/json");
+                }
                 return;
             }
-            res.status = 200;
-            res.set_content(make_async_job_json(manager, job).dump(), "application/json");
-            return;
+            auto& job = *it->second;
+            if (job.kind == AsyncJobKind::Workflow &&
+                !workflow_local_request_allowed(req, *runtime->svr_params)) {
+                res.status = 403;
+                res.set_content(R"({"code":"workflow_local_only","error":"direct loopback request required"})", "application/json");
+                return;
+            }
+            if (job.status == AsyncJobStatus::Queued) {
+                if (!cancel_queued_job(manager, job)) {
+                    res.status = 409;
+                    res.set_content(R"({"error":"job queue state changed before cancellation"})", "application/json");
+                    return;
+                }
+                terminal_lease = it->second;
+            } else if (job.status == AsyncJobStatus::Generating) {
+                job.cancel_requested.store(true);
+                snapshot = make_async_job_json(manager, job);
+            } else {
+                terminal_lease = it->second;
+            }
         }
-
-        if (job.status == AsyncJobStatus::Generating) {
-            job.cancel_requested.store(true);
-            res.status = 200;
-            res.set_content(make_async_job_json(manager, job).dump(), "application/json");
-            return;
-        }
-
+        if (terminal_lease)
+            snapshot = make_async_terminal_job_json(*terminal_lease);
         res.status = 200;
-        res.set_content(make_async_job_json(manager, job).dump(), "application/json");
+        res.set_content(snapshot.dump(), "application/json");
     });
 }

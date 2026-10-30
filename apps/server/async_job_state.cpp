@@ -5,6 +5,7 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 int64_t unix_timestamp_now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -120,7 +121,7 @@ bool cancel_queued_job(AsyncJobManager& manager, AsyncGenerationJob& job) {
     return true;
 }
 
-json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJob& job) {
+static json make_async_job_json_impl(const AsyncJobManager* manager, const AsyncGenerationJob& job) {
     json result;
     result["id"]               = job.id;
     result["kind"]             = async_job_kind_name(job.kind);
@@ -132,8 +133,11 @@ json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJo
     result["queue_position"]   = 0;
 
     if (job.status == AsyncJobStatus::Queued) {
+        if (manager == nullptr) {
+            throw std::logic_error("queued job requires manager-locked snapshot");
+        }
         size_t position = 1;
-        for (const auto& queued_id : manager.queue) {
+        for (const auto& queued_id : manager->queue) {
             if (queued_id == job.id) {
                 result["queue_position"] = position;
                 break;
@@ -202,7 +206,19 @@ json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJo
     return result;
 }
 
+json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJob& job) {
+    // Caller holds manager.mutex for queued/running snapshots, including preview.
+    return make_async_job_json_impl(&manager, job);
+}
 
+json make_async_terminal_job_json(const AsyncGenerationJob& job) {
+    // Only terminal jobs are immutable after the shared manager commit point.
+    // A shared_ptr reader lease keeps the payload alive even if the TTL
+    // sweeper erases the registry entry while HTTP serialization is running.
+    if (job.status == AsyncJobStatus::Queued || job.status == AsyncJobStatus::Generating)
+        throw std::logic_error("non-terminal job requires manager-locked snapshot");
+    return make_async_job_json_impl(nullptr, job);
+}
 
 std::shared_ptr<AsyncGenerationJob> start_next_async_job(AsyncJobManager& manager) {
     // Caller holds manager.mutex. The queue and job status share one owner.

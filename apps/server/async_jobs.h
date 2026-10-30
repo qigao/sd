@@ -96,6 +96,9 @@ std::shared_ptr<AsyncGenerationJob> start_next_async_job(AsyncJobManager& manage
 bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
                       AsyncJobCompletion&& completion);
 json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJob& job);
+// Snapshot only a terminal immutable job. May be called without manager.mutex
+// while holding a shared_ptr lease obtained under that mutex.
+json make_async_terminal_job_json(const AsyncGenerationJob& job);
 bool execute_img_gen_job(ServerRuntime& runtime,
                          AsyncGenerationJob& job,
                          std::vector<std::string>& output_images,

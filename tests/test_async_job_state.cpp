@@ -5,6 +5,7 @@
 #include <chrono>
 #include <memory>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -214,4 +215,49 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         purge_expired_jobs(manager);
         check_true(manager.expired_jobs.find(finished->id) == manager.expired_jobs.end());
     }
+    it("keeps terminal payload readable after registry expiry without manager lock")
+    {
+        AsyncJobManager manager;
+        std::shared_ptr<AsyncGenerationJob> lease;
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            lease = enqueue(manager, AsyncJobKind::Workflow);
+            check_true(start_next_async_job(manager) == lease);
+            lease->workflow_node_states = {"completed", "completed"};
+            AsyncJobCompletion output = successful_output();
+            output.result_workflow = {{"version", 1},
+                                      {"payload", std::string(128 * 1024, 'a')}};
+            check_true(finish_async_job(manager, *lease, std::move(output)));
+            lease->completed_at = unix_timestamp_now_ms() -
+                (manager.completed_ttl_seconds + 2) * 1000;
+            purge_expired_jobs(manager);
+            check_true(manager.jobs.find(lease->id) == manager.jobs.end());
+            check_true(manager.expired_jobs.find(lease->id) != manager.expired_jobs.end());
+        }
+        // No manager lock is held. Data must remain immutable and available
+        // until the reader's shared_ptr lease is retired.
+        const json terminal = make_async_terminal_job_json(*lease);
+        check_true(terminal["status"] == "completed");
+        check_true(terminal["error"].is_null());
+        check_equal(terminal["result"]["payload"].get<std::string>().size(),
+                    static_cast<size_t>(128 * 1024));
+    }
+
+    it("rejects unlocked snapshot reads from non-terminal jobs")
+    {
+        AsyncJobManager manager;
+        std::shared_ptr<AsyncGenerationJob> job;
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            job = enqueue(manager, AsyncJobKind::Workflow);
+        }
+        bool rejected = false;
+        try {
+            (void)make_async_terminal_job_json(*job);
+        } catch (const std::logic_error&) {
+            rejected = true;
+        }
+        check_true(rejected);
+    }
+
 }

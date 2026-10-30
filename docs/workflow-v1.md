@@ -97,6 +97,9 @@ manager.mutex 下的读写；终态发布后不再执行下一节点。
 - 成功结果中被选择的 PNG base64 与 generation metadata 合计最高 8 MiB，
   超出时显式失败并不发布部分结果。现阶段通过**原有** job status
   JSON 返回这段有界媒体，尚不是 CHttp artifact/streaming endpoint。
+- 终态成功/失败/取消后的字段不可变。HTTP 查询/取消先在 manager 锁内取得
+  `shared_ptr` reader lease，再在锁外构建终态 JSON；TTL 可从 registry 清除该任务，
+  但在途 reader 的媒体不会被提前释放。排队/运行状态仍须加锁读取。
 - 工作流在本进程内保存，沿用原任务的 TTL；不保证重启恢复或持久幂等。
   工作流 JSON 中不保存 SDK context、原生指针、HTTP request/WS 连接。
 - 请求体限制当前是在 httplib 已接收 body 后检查；它**不是**上传层流式准入，
