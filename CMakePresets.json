@@ -36,6 +36,7 @@
         "SD_MUSA": false,
         "SD_RPC": false,
         "GGML_CPU": true,
+        "GGML_NATIVE": false,
         "GGML_CUDA": false,
         "GGML_HIP": false,
         "GGML_METAL": false,
@@ -76,6 +77,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "GGML_NATIVE": true,
         "SD_APP_BUILD_CLI": true,
         "SD_APP_BUILD_SERVER": true
       }

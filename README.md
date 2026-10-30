@@ -71,6 +71,7 @@ Windows、CUDA 和调试步骤见 [本地开发](docs/local-development.md)。
 | `cpu-release` | 静态库 C API 基线 | 1 项 CTest |
 | `cpu-shared-server` | 共享 sd.cpp/GGML、动态 CPU/RPC、本地与上游入口共存 | 11 项 CTest |
 
+CI 的两个 CPU 构建组合固定 `GGML_NATIVE=OFF`，避免跨 runner 指令集差异与复用 native 编译缓存造成 SIGILL；本地 `dev-cpu` 仍保留 `GGML_NATIVE=ON`。
 CI 只保留原生构建矩阵，完整构建所选图、执行 CTest、核对精确提交，使用编译缓存并取消
 同一 PR 的旧运行。当前测试不下载模型，不证明 GPU、真实生成、远程 RPC 或未来 CHttp 接入。
 

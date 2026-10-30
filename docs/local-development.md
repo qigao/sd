@@ -63,6 +63,17 @@ curl --fail http://127.0.0.1:1234/sdcpp/v1/recipes
 服务可在没有权重时提供目录与状态，生成仍需加载兼容模型。当前基线没有新服务所需的
 身份与任务归属校验，只用于本地推理接入验证；不得将其响应当作 CHttp 认证已实现。
 
+## CPU runner 指令集与缓存
+
+CI 的 `cpu-release` / `cpu-shared-server` 显式使用 `GGML_NATIVE=OFF`：
+GitHub runner 可能有不同的 CPU ISA，不能用带 `-march=native` 的编译缓存跨机器部署。
+CI 配置步骤会读取实际 `CMakeCache.txt` 强制验证这一约束，不跳过
+`sd_list_devices()` 等真实 C API 测试。
+
+本机 `dev-cpu` 与 `dev-cuda` 保留 `GGML_NATIVE=ON` 以使用本机原生 CPU 优化。
+用户仍可通过 `-DGGML_NATIVE=OFF/ON` 显式覆盖。此限制仅用于两个
+共享缓存的 CI CPU 配置，未删除或强制关闭上游其他 SD/GGML 设备选项。
+
 ## CUDA
 
 `dev-cuda` 启用上游 `SD_CUDA` / `GGML_CUDA`。先准备匹配的 CUDA 工具链及 CUTLASS：

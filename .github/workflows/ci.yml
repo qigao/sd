@@ -74,6 +74,33 @@ jobs:
           cmake --preset "$INFERENCE_PRESET" \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          # A CI runner can have a different x86 ISA from the runner that
+          # populated ccache. -march=native is not portable across runners.
+          if ! grep -Eq '^GGML_NATIVE:BOOL=(OFF|FALSE)
+
+      - name: Build complete configured graph
+        shell: bash
+        run: cmake --build --preset "$INFERENCE_PRESET"
+
+      - name: Test through CTest
+        shell: bash
+        run: ctest --preset "$INFERENCE_PRESET"
+
+      - name: Report compiler cache statistics
+        shell: bash
+        run: ccache --show-stats
+
+      - name: Verify unchanged tracked sources
+        if: always()
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git diff --exit-code
+          git diff --cached --exit-code
+ "build/$INFERENCE_PRESET/CMakeCache.txt"; then
+            echo "ERROR: CI CPU profiles must not compile -march=native" >&2
+            exit 1
+          fi
 
       - name: Build complete configured graph
         shell: bash
