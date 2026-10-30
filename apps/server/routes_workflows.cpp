@@ -79,9 +79,11 @@ void register_workflow_endpoints(httplib::Server& server, ServerRuntime& runtime
             const AsyncJobAdmission receipt = admit_async_job(manager, job);
             if (receipt.status != AsyncJobAdmissionStatus::Accepted) {
                 const bool stopping = receipt.status == AsyncJobAdmissionStatus::Stopping;
+                const bool retained = receipt.status == AsyncJobAdmissionStatus::RetainedFull;
                 workflow_error(res, stopping ? 503 : 429,
-                               stopping ? "shutting_down" : "workflow_capacity",
-                               stopping ? "worker admission closed" : "workflow or job queue is full");
+                               stopping ? "shutting_down" : retained ? "retention_capacity" : "workflow_capacity",
+                               stopping ? "worker admission closed" :
+                                          retained ? "job retention capacity is full" : "workflow or job queue is full");
                 return;
             }
             res.status = 202;

@@ -71,6 +71,9 @@ struct AsyncJobManager {
     uint64_t next_id              = 0;
     bool stop                     = false;
     size_t max_pending_jobs       = 64;
+    // Bound *all* retained job records (queued, generating and terminal),
+    // independently of pending capacity and the 4-workflow retention limit.
+    size_t max_retained_jobs      = 256;
     int64_t completed_ttl_seconds = 600;
     int64_t failed_ttl_seconds    = 600;
 };
@@ -85,6 +88,7 @@ enum class AsyncJobAdmissionStatus {
     Accepted,
     Stopping,
     QueueFull,
+    RetainedFull,
     WorkflowFull,
 };
 

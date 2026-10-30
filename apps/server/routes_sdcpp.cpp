@@ -709,7 +709,9 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
                 res.set_content(
                     receipt.status == AsyncJobAdmissionStatus::Stopping
                         ? R"({"error":"worker admission closed"})"
-                        : R"({"error":"job queue is full"})",
+                        : receipt.status == AsyncJobAdmissionStatus::RetainedFull
+                              ? R"({"error":"job retention capacity is full"})"
+                              : R"({"error":"job queue is full"})",
                     "application/json");
                 return;
             }
@@ -759,7 +761,9 @@ void register_sdcpp_api_endpoints(httplib::Server& svr, ServerRuntime& rt) {
                 res.set_content(
                     receipt.status == AsyncJobAdmissionStatus::Stopping
                         ? R"({"error":"worker admission closed"})"
-                        : R"({"error":"job queue is full"})",
+                        : receipt.status == AsyncJobAdmissionStatus::RetainedFull
+                              ? R"({"error":"job retention capacity is full"})"
+                              : R"({"error":"job queue is full"})",
                     "application/json");
                 return;
             }

@@ -98,6 +98,12 @@ manager.mutex 下的读写；终态发布后不再执行下一节点。
 - 请求 JSON 最高 64 KiB；1–4 个节点；单 DAG 所有节点合计像素至多 2 MiPx。
 - 最多保留 4 个未过期 Workflow job（包含成功/失败/取消的 TTL 项），并参与
   现有 64 个 pending 全局额度；超出返回 429。
+- 所有任务类型的 **retained registry 总量上限为 256 项**（包含 queued、running、
+  completed、failed 和 cancelled），与 64 个 pending 配额独立。达到上限后
+  新提交统一返回 429：原生 image/video 响应 `job retention capacity is full`，
+  Workflow 响应 `retention_capacity`。到期清理先于容量检查；**不会为接纳新任务
+  提前移除任何未过期结果**。单个结果字节/磁盘/用户配额仍须在 CHttp 正式服务实现，
+  本项数上限不能当作完整内存限额。
 - 成功结果中被选择的 PNG base64 与 generation metadata 合计最高 8 MiB，
   超出时显式失败并不发布部分结果。现阶段通过**原有** job status
   JSON 返回这段有界媒体，尚不是 CHttp artifact/streaming endpoint。

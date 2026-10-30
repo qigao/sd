@@ -330,6 +330,101 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         check_equal(manager.jobs.size(), static_cast<size_t>(4));
     }
 
+    it("bounds retained terminal records across image/video kinds without silently evicting results")
+    {
+        TestAsyncJobManager manager;
+        manager.max_pending_jobs = 64;
+        manager.max_retained_jobs = 3;
+
+        std::vector<std::shared_ptr<AsyncGenerationJob>> retained;
+        for (AsyncJobKind kind : {AsyncJobKind::ImgGen, AsyncJobKind::VidGen,
+                                  AsyncJobKind::ImgGen}) {
+            auto job = std::make_shared<AsyncGenerationJob>();
+            job->kind = kind;
+            const auto receipt = admit_async_job(manager, job);
+            check_true(receipt.status == AsyncJobAdmissionStatus::Accepted);
+            retained.push_back(job);
+        }
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            // One success, one client cancellation and one native failure
+            // all remain in the registry until their respective TTL expires.
+            check_true(start_next_async_job(manager) == retained[0]);
+            check_true(finish_async_job(manager, *retained[0],
+                                        successful_output(AsyncJobKind::ImgGen)));
+            check_true(cancel_queued_job(manager, *retained[1]));
+            check_true(start_next_async_job(manager) == retained[2]);
+            AsyncJobCompletion failed;
+            failed.error_message = "injected native failure";
+            check_true(finish_async_job(manager, *retained[2], std::move(failed)));
+            check_equal(manager.jobs.size(), static_cast<size_t>(3));
+            check_equal(count_pending_jobs(manager), static_cast<size_t>(0));
+        }
+        auto fourth = std::make_shared<AsyncGenerationJob>();
+        fourth->kind = AsyncJobKind::Workflow;
+        const auto blocked = admit_async_job(manager, fourth);
+        check_true(blocked.status == AsyncJobAdmissionStatus::RetainedFull);
+        check_true(blocked.receipt_json.empty());
+        check_true(fourth->id.empty());
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            check_equal(manager.jobs.size(), static_cast<size_t>(3));
+            check_true(make_async_job_json(manager, *retained[0])["result"]["images"].is_array());
+            check_true(make_async_job_json(manager, *retained[1])["result"].is_null());
+            check_true(make_async_job_json(manager, *retained[2])["result"].is_null());
+            retained[1]->completed_at = unix_timestamp_now_ms() -
+                (manager.failed_ttl_seconds + 2) * 1000;
+        }
+        // Only the genuinely expired terminal is reclaimed. Other results
+        // must stay queryable, and the newly freed record accepts one job.
+        const auto admitted = admit_async_job(manager, fourth);
+        check_true(admitted.status == AsyncJobAdmissionStatus::Accepted);
+        check_false(fourth->id.empty());
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            check_equal(manager.jobs.size(), static_cast<size_t>(3));
+            check_true(manager.jobs.find(retained[1]->id) == manager.jobs.end());
+            check_true(manager.expired_jobs.find(retained[1]->id) !=
+                       manager.expired_jobs.end());
+            check_true(manager.jobs.find(retained[0]->id) != manager.jobs.end());
+            check_true(manager.jobs.find(retained[2]->id) != manager.jobs.end());
+        }
+    }
+
+    it("serializes competing retained-record admissions independently of the pending quota")
+    {
+        TestAsyncJobManager manager;
+        manager.max_pending_jobs = 64;
+        manager.max_retained_jobs = 1;
+        constexpr int contenders = 12;
+        std::atomic<int> arrived{0};
+        std::atomic<int> admitted{0};
+        std::atomic<int> refused{0};
+        std::vector<std::thread> threads;
+        threads.reserve(contenders);
+        for (int i = 0; i < contenders; ++i) {
+            threads.emplace_back([&] {
+                auto job = std::make_shared<AsyncGenerationJob>();
+                job->kind = AsyncJobKind::VidGen;
+                arrived.fetch_add(1);
+                while (arrived.load() != contenders)
+                    std::this_thread::yield();
+                const auto response = admit_async_job(manager, job);
+                if (response.status == AsyncJobAdmissionStatus::Accepted)
+                    admitted.fetch_add(1);
+                else if (response.status == AsyncJobAdmissionStatus::RetainedFull)
+                    refused.fetch_add(1);
+            });
+        }
+        for (auto& thread : threads)
+            thread.join();
+        check_equal(admitted.load(), 1);
+        check_equal(refused.load(), contenders - 1);
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        check_equal(manager.jobs.size(), static_cast<size_t>(1));
+        check_equal(manager.queue.size(), static_cast<size_t>(1));
+    }
+
     it("admits at most one job under concurrent capacity contention")
     {
         TestAsyncJobManager manager;

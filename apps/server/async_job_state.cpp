@@ -125,6 +125,13 @@ AsyncJobAdmission admit_async_job(AsyncJobManager& manager,
             admission.status = AsyncJobAdmissionStatus::QueueFull;
             return admission;
         }
+        // Pending count alone does not cap completed/failed/cancelled media
+        // retained for the result TTL. Do not evict an unexpired reader's
+        // result to make space; reject before assigning an ID or waking work.
+        if (manager.jobs.size() >= manager.max_retained_jobs) {
+            admission.status = AsyncJobAdmissionStatus::RetainedFull;
+            return admission;
+        }
         if (job->kind == AsyncJobKind::Workflow) {
             size_t retained_workflows = 0;
             for (const auto& existing : manager.jobs) {
