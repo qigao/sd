@@ -39,6 +39,9 @@ struct AsyncGenerationJob {
     int64_t created_at   = unix_timestamp_now_ms();
     int64_t started_at   = 0;
     int64_t completed_at = 0;
+    // Exact base64 media bytes charged while a completed result remains in
+    // the registry; independent reader leases may outlive registry expiry.
+    size_t retained_media_bytes = 0;
     ImgGenJobRequest img_gen;
     VidGenJobRequest vid_gen;
     WorkflowV1 workflow;
@@ -74,6 +77,12 @@ struct AsyncJobManager {
     // Bound *all* retained job records (queued, generating and terminal),
     // independently of pending capacity and the 4-workflow retention limit.
     size_t max_retained_jobs      = 256;
+    // Limits the base64-encoded media stored in completed registry records.
+    // Does not claim to bound temporary inference allocations, GPU memory,
+    // JSON metadata, or in-flight HTTP reader copies.
+    size_t max_job_media_bytes = 128ULL * 1024 * 1024;
+    size_t max_retained_media_bytes = 256ULL * 1024 * 1024;
+    size_t retained_media_bytes = 0; // protected by mutex
     int64_t completed_ttl_seconds = 600;
     int64_t failed_ttl_seconds    = 600;
 };

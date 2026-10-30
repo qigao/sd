@@ -391,6 +391,141 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         }
     }
 
+    it("rejects oversized image, video and Workflow results without publishing partial output")
+    {
+        for (AsyncJobKind kind : {AsyncJobKind::ImgGen, AsyncJobKind::VidGen,
+                                  AsyncJobKind::Workflow}) {
+            TestAsyncJobManager manager;
+            manager.max_job_media_bytes = 6; // valid fixture media is 7 bytes
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            auto job = enqueue(manager, kind);
+            check_true(start_next_async_job(manager) == job);
+            if (kind == AsyncJobKind::Workflow)
+                job->workflow_node_states = {"completed", "completed"};
+            check_true(finish_async_job(manager, *job, successful_output(kind)));
+            check_true(job->status == AsyncJobStatus::Failed);
+            check_equal(manager.retained_media_bytes, static_cast<size_t>(0));
+            check_equal(job->retained_media_bytes, static_cast<size_t>(0));
+            check_true(job->result_images_b64.empty());
+            check_true(job->result_media_b64.empty());
+            check_true(job->result_workflow.is_null());
+            const auto terminal = make_async_job_json(manager, *job);
+            check_true(terminal["result"].is_null());
+            check_equal(terminal["error"]["code"].get<std::string>(),
+                        std::string("result_too_large"));
+        }
+    }
+
+    it("preserves prior results when global media retention is exhausted and releases only at TTL")
+    {
+        TestAsyncJobManager manager;
+        manager.max_job_media_bytes = 32;
+        manager.max_retained_media_bytes = 13;
+        std::shared_ptr<AsyncGenerationJob> first, blocked, after_expiry;
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            first = enqueue(manager, AsyncJobKind::ImgGen);
+            blocked = enqueue(manager, AsyncJobKind::VidGen);
+            check_true(start_next_async_job(manager) == first);
+            check_true(finish_async_job(manager, *first,
+                                        successful_output(AsyncJobKind::ImgGen)));
+            check_equal(first->retained_media_bytes, static_cast<size_t>(7));
+            check_equal(manager.retained_media_bytes, static_cast<size_t>(7));
+            check_true(start_next_async_job(manager) == blocked);
+            check_true(finish_async_job(manager, *blocked,
+                                        successful_output(AsyncJobKind::VidGen)));
+            check_true(blocked->status == AsyncJobStatus::Failed);
+            check_equal(blocked->retained_media_bytes, static_cast<size_t>(0));
+            check_equal(manager.retained_media_bytes, static_cast<size_t>(7));
+            const auto response = make_async_job_json(manager, *blocked);
+            check_true(response["result"].is_null());
+            check_equal(response["error"]["code"].get<std::string>(),
+                        std::string("result_capacity"));
+            check_true(make_async_job_json(manager, *first)["result"]["images"].is_array());
+            // The original reader holds a lease when the registry sweeper
+            // removes this exact TTL-expired terminal entry.
+            first->completed_at = unix_timestamp_now_ms() -
+                                  (manager.completed_ttl_seconds + 2) * 1000;
+            purge_expired_jobs(manager);
+            check_equal(manager.retained_media_bytes, static_cast<size_t>(0));
+            check_true(manager.jobs.find(first->id) == manager.jobs.end());
+            check_true(manager.expired_jobs.find(first->id) != manager.expired_jobs.end());
+            after_expiry = enqueue(manager, AsyncJobKind::Workflow);
+            after_expiry->workflow_node_states = {"completed", "completed"};
+            check_true(start_next_async_job(manager) == after_expiry);
+            check_true(finish_async_job(manager, *after_expiry, successful_output()));
+            check_true(after_expiry->status == AsyncJobStatus::Completed);
+            check_equal(manager.retained_media_bytes, static_cast<size_t>(7));
+        }
+        check_true(make_async_terminal_job_json(*first)["result"]["images"].is_array());
+        check_true(make_async_terminal_job_json(*after_expiry)["result"]["outputs"].is_array());
+        check_equal(blocked->error_code, std::string("result_capacity"));
+    }
+
+    it("serializes concurrent media publication against the global result byte budget")
+    {
+        TestAsyncJobManager manager;
+        manager.max_retained_media_bytes = 7;
+        manager.max_job_media_bytes = 7;
+        constexpr int contenders = 12;
+        std::vector<std::shared_ptr<AsyncGenerationJob>> workers;
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            for (int i = 0; i < contenders; ++i)
+                workers.push_back(enqueue(manager, AsyncJobKind::ImgGen));
+            for (int i = 0; i < contenders; ++i)
+                check_true(start_next_async_job(manager) == workers[static_cast<size_t>(i)]);
+        }
+        std::atomic<int> ready{0};
+        std::atomic<int> completed{0};
+        std::atomic<int> exceeded{0};
+        std::vector<std::thread> threads;
+        for (const auto& worker : workers) {
+            threads.emplace_back([&, worker] {
+                ready.fetch_add(1);
+                while (ready.load() != contenders)
+                    std::this_thread::yield();
+                std::lock_guard<std::mutex> lock(manager.mutex);
+                const bool changed = finish_async_job(
+                    manager, *worker, successful_output(AsyncJobKind::ImgGen));
+                if (changed && worker->status == AsyncJobStatus::Completed)
+                    completed.fetch_add(1);
+                else if (changed && worker->error_code == "result_capacity")
+                    exceeded.fetch_add(1);
+            });
+        }
+        for (auto& thread : threads)
+            thread.join();
+        check_equal(completed.load(), 1);
+        check_equal(exceeded.load(), contenders - 1);
+        {
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            check_equal(manager.retained_media_bytes, static_cast<size_t>(7));
+            size_t charged = 0;
+            for (const auto& worker : workers)
+                charged += worker->retained_media_bytes;
+            check_equal(charged, manager.retained_media_bytes);
+        }
+    }
+
+    it("does not reserve media bytes when cancellation beats a valid native result")
+    {
+        TestAsyncJobManager manager;
+        manager.max_job_media_bytes = 0;
+        manager.max_retained_media_bytes = 0;
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        auto job = enqueue(manager, AsyncJobKind::ImgGen);
+        check_true(start_next_async_job(manager) == job);
+        job->cancel_requested.store(true);
+        check_true(finish_async_job(manager, *job, successful_output(AsyncJobKind::ImgGen)));
+        check_true(job->status == AsyncJobStatus::Cancelled);
+        check_equal(job->retained_media_bytes, static_cast<size_t>(0));
+        check_equal(manager.retained_media_bytes, static_cast<size_t>(0));
+        const auto terminal = make_async_job_json(manager, *job);
+        check_equal(terminal["error"]["code"].get<std::string>(),
+                    std::string("cancelled"));
+    }
+
     it("serializes competing retained-record admissions independently of the pending quota")
     {
         TestAsyncJobManager manager;

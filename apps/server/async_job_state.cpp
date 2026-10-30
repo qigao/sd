@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -66,8 +67,14 @@ void purge_expired_jobs(AsyncJobManager& manager) {
                                   ? manager.completed_ttl_seconds
                                   : manager.failed_ttl_seconds;
         if (now - job->completed_at >= ttl_seconds * 1000) {
+            // The registry owner alone charges the retained-media quota.
+            // A concurrent HTTP reader has a shared_ptr lease and may finish
+            // serializing a result after it disappears from this registry.
+            if (job->retained_media_bytes > manager.retained_media_bytes)
+                throw std::logic_error("inconsistent native media retention ledger");
             manager.expired_jobs[job->id] = now + std::max<int64_t>(ttl_seconds, 60) * 1000;
-            it                            = manager.jobs.erase(it);
+            manager.retained_media_bytes -= job->retained_media_bytes;
+            it = manager.jobs.erase(it);
         } else {
             ++it;
         }
@@ -490,6 +497,39 @@ const char* invalid_native_completion(const AsyncGenerationJob& job,
     }
     return "unsupported native job kind";
 }
+
+// Count only the encoded media strings actually retained by Completed jobs.
+// No serialization or large copy is needed under AsyncJobManager.mutex.
+// JSON metadata and temporary encoder/GPU allocations have separate owners.
+bool measure_native_media_bytes(const AsyncGenerationJob& job,
+                                const AsyncJobCompletion& value,
+                                size_t& bytes) {
+    bytes = 0;
+    const auto add = [&](size_t length) {
+        if (length > std::numeric_limits<size_t>::max() - bytes)
+            return false;
+        bytes += length;
+        return true;
+    };
+    if (job.kind == AsyncJobKind::ImgGen) {
+        for (const auto& image : value.result_images_b64)
+            if (!add(image.size()))
+                return false;
+        return true;
+    }
+    if (job.kind == AsyncJobKind::VidGen)
+        return add(value.result_media_b64.size());
+    if (job.kind == AsyncJobKind::Workflow) {
+        for (const auto& output : value.result_workflow.at("outputs")) {
+            for (const auto& image : output.at("images")) {
+                if (!add(image.at("b64_json").get_ref<const std::string&>().size()))
+                    return false;
+            }
+        }
+        return true;
+    }
+    return false;
+}
 } // namespace
 
 bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
@@ -497,7 +537,6 @@ bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
     // Caller holds manager.mutex; a successful completion/cancellation race is
     // ordered against the HTTP cancel route by the same lock. No later write is
     // permitted once a terminal status has been published.
-    (void)manager;
     if (job.status != AsyncJobStatus::Generating)
         return false;
 
@@ -515,6 +554,32 @@ bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
         if (invalid_result) {
             completion.success = false;
             completion.error_message = invalid_result;
+        }
+    }
+    // Enforce per-result and global retained *base64 media* byte budgets
+    // before any payload moves or the Completed status becomes visible.
+    const char* media_error = nullptr;
+    const char* media_code = nullptr;
+    size_t result_media_bytes = 0;
+    if (!cancelled && completion.success) {
+        try {
+            if (!measure_native_media_bytes(job, completion, result_media_bytes) ||
+                result_media_bytes > manager.max_job_media_bytes) {
+                media_error = "native generated media exceeds per-job retention budget";
+                media_code = "result_too_large";
+            } else if (manager.retained_media_bytes > manager.max_retained_media_bytes ||
+                       result_media_bytes >
+                           manager.max_retained_media_bytes - manager.retained_media_bytes) {
+                media_error = "native generated media exceeds global retention budget";
+                media_code = "result_capacity";
+            }
+        } catch (...) {
+            media_error = "native generated media accounting failed";
+            media_code = "result_too_large";
+        }
+        if (media_error) {
+            completion.success = false;
+            completion.error_message = media_error;
         }
     }
     if (!completion.success && completion.error_message.empty())
@@ -535,9 +600,12 @@ bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
         job.result_workflow = std::move(completion.result_workflow);
         job.error_code.clear();
         job.error_message.clear();
+        job.retained_media_bytes = result_media_bytes;
+        manager.retained_media_bytes += result_media_bytes;
         job.status = AsyncJobStatus::Completed;
     } else {
-        job.error_code = invalid_result ? "invalid_generation_result" : "generation_failed";
+        job.error_code = invalid_result ? "invalid_generation_result"
+                                        : media_code ? media_code : "generation_failed";
         job.error_message = std::move(completion.error_message);
         clear_outputs(job);
         job.status = AsyncJobStatus::Failed;

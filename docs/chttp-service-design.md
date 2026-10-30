@@ -294,6 +294,15 @@ WS 订阅/队列与回放窗口。乘法与累计预算执行溢出检查，不�
 终态释放无需继续执行的输入/预览；元数据、结果和过期 tombstone 有独立数量/字节/TTL
 预算及主动清理。发送完成、reader lease 和 worker quiescence 决定何时可回收，不能只看时间。
 
+当前本地 AsyncJobManager 已提供分层的 **256 条保留记录 / 64 pending / 4 Workflow**
+准入，以及 128 MiB 每结果、256 MiB registry-owned 编码媒体保留预算。
+提交结果时在同一 mutex 下计算 base64 字节，失败不会占用或发布部分结果，
+到期时返还计数，期间不提前驱逐有效结果。它**不**统计正在执行的 native/GPU
+工作集、原生编码时的临时缓存、已取得 reader lease 的额外生命周期、HTTP/2
+输出缓冲、JSON metadata 或用户级身份。正式 CHttp 服务须独立建立从请求准入、
+模型执行、编码、artifact 发布、出站响应到 reader 退休的完整字节/配额账本，
+不能把本地 256 MiB 预算直接标成生产级全进程内存上限。
+
 第一版任务 registry 明确为进程内状态，不宣称重启恢复。响应包含 service instance 身份，
 重启后旧任务/请求索引不可恢复时明确返回未知状态，客户端不得因超时或重启自动重放。
 若后续要求重启恢复，持久化任务定义、模型/输入修订、状态和 artifact manifest；不保存

@@ -102,8 +102,19 @@ manager.mutex 下的读写；终态发布后不再执行下一节点。
   completed、failed 和 cancelled），与 64 个 pending 配额独立。达到上限后
   新提交统一返回 429：原生 image/video 响应 `job retention capacity is full`，
   Workflow 响应 `retention_capacity`。到期清理先于容量检查；**不会为接纳新任务
-  提前移除任何未过期结果**。单个结果字节/磁盘/用户配额仍须在 CHttp 正式服务实现，
-  本项数上限不能当作完整内存限额。
+  提前移除任何未过期结果**。该记录数上限本身不能当作完整内存限额。
+- 完成态的**编码媒体 base64** 增加独立上限：每任务最多 **128 MiB**，
+  当前进程所有 *registry-owned* 完成任务媒体总计最多 **256 MiB**。
+  生产 worker 在 manager 锁下原子计算并登记已选中图片、视频和 Workflow
+  输出中的 base64 字节，不序列化整个 JSON。超出任务上限形成
+  `result_too_large`，总额不足形成 `result_capacity` 的 Failed 终态；
+  不发布任何部分媒体，不预先删除已有结果。正常完成后，配额占用一直保留至
+  该任务 TTL 到期并从 registry 中删除，取消/失败不占媒体配额。
+  HTTP reader 持有的 `shared_ptr` lease 可以在 TTL 过期后安全完成，
+  **这些短期借用副本不计入 registry 指标**。
+  当前预算只覆盖保留的编码媒体，不包括元数据、临时编码缓存、输入/上传、
+  GPU 上下文、网络发送缓冲和持久 artifact；它不是完整内存配额。
+  完整输入/输出内存字节、磁盘和用户身份配额仍由正式 CHttp 实现。
 - 成功结果中被选择的 PNG base64 与 generation metadata 合计最高 8 MiB，
   超出时显式失败并不发布部分结果。现阶段通过**原有** job status
   JSON 返回这段有界媒体，尚不是 CHttp artifact/streaming endpoint。

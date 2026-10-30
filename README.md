@@ -25,6 +25,10 @@
 原生输出的 C 结果结构、像素缓冲和 ADetailer 元数据采用异常安全所有权转移，
 无权重 CTest 包含 native image/video owner 接管测试；真实权重故障资格仍未完成。
 
+本地原生任务保留表另以每任务 128 MiB、全局 256 MiB 的**编码媒体**
+预算管理 Completed 结果，并在 TTL 清理时退回配额；这不包括 GPU/临时编码/
+HTTP reader 或用户级存储预算，正式集成仍需 CHttp 对象/会话配额。
+
 图像、视频及 Workflow 提交统一使用原子 `AsyncJobManager` 接纳与不可变 202 回执，
 默认 CI 的原生任务状态测试覆盖容量、并发接纳、取消/完成竞争与 TTL 回收。
 正式的 HTTP/2 用户身份、幂等提交及产物存储仍需 CHttp 接入。
