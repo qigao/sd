@@ -3,6 +3,7 @@
 #include <string>
 
 #include "runtime.h"
+#include "workflow_v1.h"
 
 struct AsyncGenerationJob;
 
