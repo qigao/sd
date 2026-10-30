@@ -131,6 +131,23 @@ RAII 清理才写 cancelled；中断不强行释放仍被 native 代码借用的
 的可信身份与 `client_request_id` 幂等索引，网络响应丢失之后的
 exactly-once/跨重启恢复依然不能保证。不得自动重发推理请求。
 
+## 原生媒体结果接管的异常安全
+
+`SDImageVec` 接管 sd.cpp 图像/视频结果时先固定原生 owner，
+预留图像和元数据容量，再逐项转移像素；转换过程中抛出异常，
+已转移的像素由 `SDImageVec` 清理，剩余项由原生 C result
+释放。接管 C `sd_image_t*` 数组使用独立 RAII 守卫，
+不因 `vector::reserve()`/插入失败泄漏尚未接管的像素。
+`SDImageOwner` 在确认容器插入成功后才移交所有权，
+复制像素时使用溢出检查，拒绝畸形尺寸。
+
+原生 ADetailer 结果在元数据融合前立刻进入 C API 结果 guard，
+避免融合异常导致后续缓冲泄漏。无权重 `test_sd_app_native_image_owners`
+使用真实 sd.cpp C 数据结构和内存释放函数验证 image/video
+结果、C 数组、复制、owner 移交与多次 clear。
+这不代替真实采样/ADetailer 执行、异常注入、GPU 释放与计数监测：
+仍需 Issue #2 的原生后端资格验收。
+
 ## Native Job Owner 终态验收
 
 生产队列、状态发布、取消/成功的原子仲裁、过期清理与 shutdown 取消

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -64,7 +65,19 @@ private:
             return {image.width, image.height, image.channel, nullptr};
         }
 
-        const size_t byte_count = static_cast<size_t>(image.width) * image.height * image.channel;
+        // Never multiply untrusted image dimensions before checking overflow.
+        // An invalid source must not trigger an undersized copy or attempt to
+        // read more than its declared backing storage.
+        if (image.width <= 0 || image.height <= 0 || image.channel <= 0)
+            return {0, 0, 0, nullptr};
+        const size_t width = static_cast<size_t>(image.width);
+        const size_t height = static_cast<size_t>(image.height);
+        const size_t channels = static_cast<size_t>(image.channel);
+        if (height > std::numeric_limits<size_t>::max() / width ||
+            channels > std::numeric_limits<size_t>::max() / (width * height))
+            return {0, 0, 0, nullptr};
+
+        const size_t byte_count = width * height * channels;
         uint8_t* raw_copy       = static_cast<uint8_t*>(malloc(byte_count));
         if (raw_copy == nullptr) {
             return {0, 0, 0, nullptr};
@@ -206,7 +219,10 @@ public:
     }
 
     void push_back(SDImageOwner&& image) {
-        images_.push_back(image.release());
+        // STL allocation may fail; keep the image owner alive until the
+        // vector has successfully taken the pointer.
+        images_.push_back(image.get());
+        (void)image.release();
     }
 
     void reserve(size_t count) {
@@ -229,8 +245,10 @@ public:
         // native result while already-transferred images stay in SDImageVec.
         std::unique_ptr<sd_image_generation_result_t, decltype(&free_sd_image_generation_result)>
             owner(result, &free_sd_image_generation_result);
-        if (!result)
+        if (!result || result->count <= 0)
             return;
+        images_.reserve(static_cast<size_t>(result->count));
+        generation_infos_.reserve(static_cast<size_t>(result->count));
         for (int i = 0; i < result->count; ++i) {
             images_.push_back(result->items[i].image);
             result->items[i].image = {};
@@ -242,8 +260,10 @@ public:
         clear();
         std::unique_ptr<sd_video_generation_result_t, decltype(&free_sd_video_generation_result)>
             owner(result, &free_sd_video_generation_result);
-        if (!result)
+        if (!result || result->frame_count <= 0)
             return;
+        images_.reserve(static_cast<size_t>(result->frame_count));
+        generation_infos_.reserve(static_cast<size_t>(result->frame_count));
         const auto info = generation_info_with_relative_lora_paths(result->generation_info, lora_model_dir);
         for (int i = 0; i < result->frame_count; ++i) {
             images_.push_back(result->frames[i]);
@@ -254,16 +274,26 @@ public:
 
     void adopt(sd_image_t* images, int count) {
         clear();
-        if (images == nullptr || count <= 0) {
-            free(images);
+        // This C array and each pixel buffer remain owned by a local
+        // exception-safe guard until the last successful per-image transfer.
+        // Reserving may throw; any untouched native buffer must still be
+        // retired by the C allocator rather than leaked.
+        auto free_remaining = [count](sd_image_t* ptr) noexcept {
+            if (!ptr)
+                return;
+            for (int i = 0; i < count; ++i)
+                free(ptr[i].data);
+            free(ptr);
+        };
+        std::unique_ptr<sd_image_t, decltype(free_remaining)> owner(images, free_remaining);
+        if (!images || count <= 0)
             return;
-        }
 
         images_.reserve(static_cast<size_t>(count));
         for (int i = 0; i < count; ++i) {
             images_.push_back(images[i]);
+            images[i] = {};
         }
-        free(images);
     }
 
     size_t size() const {

@@ -148,22 +148,26 @@ bool apply_server_adetailer(ServerRuntime& runtime,
             }
 
             sd_image_generation_result_t* detailed = nullptr;
-            if (!adetail_image(ad_ctx.get(),
-                               runtime.sd_ctx,
-                               results[i],
-                               &ad_params,
-                               &ad_generation_params,
-                               &detailed) ||
-                detailed == nullptr || detailed->count <= 0 || detailed->items[0].image.data == nullptr) {
-                free_sd_image_generation_result(detailed);
+            const bool generation_ok = adetail_image(ad_ctx.get(),
+                                                    runtime.sd_ctx,
+                                                    results[i],
+                                                    &ad_params,
+                                                    &ad_generation_params,
+                                                    &detailed);
+            // Metadata merges may allocate and throw. Keep *all* remaining
+            // native images owned until the single transfer is committed.
+            std::unique_ptr<sd_image_generation_result_t, decltype(&free_sd_image_generation_result)>
+                detailed_owner(detailed, &free_sd_image_generation_result);
+            if (!generation_ok || !detailed_owner || detailed_owner->count <= 0 ||
+                detailed_owner->items[0].image.data == nullptr) {
                 LOG_ERROR("ADetailer failed for image %d", i + 1);
                 return false;
             }
-            results.append_generation_info(i, detailed->items[0].generation_info, runtime.ctx_params->lora_model_dir);
+            results.append_generation_info(i, detailed_owner->items[0].generation_info,
+                                           runtime.ctx_params->lora_model_dir);
             free(results[i].data);
-            results[i]               = detailed->items[0].image;
-            detailed->items[0].image = {};
-            free_sd_image_generation_result(detailed);
+            results[i] = detailed_owner->items[0].image;
+            detailed_owner->items[0].image = {};
         }
     }
     return true;

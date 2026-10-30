@@ -105,3 +105,16 @@ if(TARGET sd_app_async_state)
     LABELS "workflow;native-owner;fault-injection;no-weights" TIMEOUT 60
     WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_sd_app_async_state>")
 endif()
+
+# Exercise native ownership handoffs against the real sd.cpp C result structs.
+# No model weights or synthetic inference backend are used. ADetailer and
+# generation still require independent real-weight lifecycle qualification.
+if(TARGET sd-app-server)
+  add_executable(test_sd_app_native_image_owners test_native_image_owners.cpp)
+  target_link_libraries(test_sd_app_native_image_owners PRIVATE
+    sd_app_common sd_app_test_tinytest)
+  add_test(NAME test_sd_app_native_image_owners COMMAND test_sd_app_native_image_owners)
+  set_tests_properties(test_sd_app_native_image_owners PROPERTIES
+    LABELS "sdcpp;native-owner;no-weights" TIMEOUT 60
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_sd_app_native_image_owners>")
+endif()
