@@ -422,6 +422,69 @@ void clear_outputs(AsyncGenerationJob& job) {
 }
 } // namespace
 
+namespace {
+// An execution callback reporting true is necessary but not sufficient to
+// publish Completed. Every existing HTTP serializer must be able to consume
+// the result without depending on malformed/missing native metadata.
+const char* invalid_native_completion(const AsyncGenerationJob& job,
+                                      const AsyncJobCompletion& value) {
+    if (job.kind == AsyncJobKind::ImgGen) {
+        if (value.result_images_b64.empty() ||
+            !value.result_generation_info.is_array() ||
+            value.result_generation_info.size() != value.result_images_b64.size())
+            return "image generation returned mismatched images and metadata";
+        for (const auto& image : value.result_images_b64)
+            if (image.empty())
+                return "image generation returned an empty encoded image";
+        return nullptr;
+    }
+    if (job.kind == AsyncJobKind::VidGen) {
+        if (value.result_media_b64.empty() || value.result_media_mime_type.empty() ||
+            value.result_fps <= 0 || value.result_frame_count <= 0 ||
+            value.result_generation_info.is_null())
+            return "video generation returned incomplete media or metadata";
+        return nullptr;
+    }
+    if (job.kind == AsyncJobKind::Workflow) {
+        // A true scheduler outcome must have finished *every* node before
+        // successful output can be published to readers.
+        if (job.workflow_node_states.size() != job.workflow.nodes.size() ||
+            std::any_of(job.workflow_node_states.begin(),
+                        job.workflow_node_states.end(),
+                        [](const std::string& state) { return state != "completed"; }))
+            return "workflow succeeded with unfinished nodes";
+        const auto& result = value.result_workflow;
+        if (!result.is_object() || !result.contains("version") ||
+            !result["version"].is_number_integer() ||
+            result["version"].get<int>() != 1 || !result.contains("model") ||
+            !result["model"].is_object() || !result.contains("outputs") ||
+            !result["outputs"].is_array() ||
+            result["outputs"].size() != job.workflow.outputs.size())
+            return "workflow generation returned an incomplete result";
+        for (size_t i = 0; i < job.workflow.outputs.size(); ++i) {
+            const size_t index = job.workflow.outputs[i];
+            if (index >= job.workflow.nodes.size())
+                return "workflow result references an unknown node";
+            const auto& output = result["outputs"][i];
+            if (!output.is_object() || !output.contains("node_id") ||
+                !output["node_id"].is_string() ||
+                output["node_id"].get<std::string>() != job.workflow.nodes[index].id ||
+                !output.contains("images") || !output["images"].is_array() ||
+                output["images"].size() != 1)
+                return "workflow result does not match requested output nodes";
+            const auto& image = output["images"][0];
+            if (!image.is_object() || !image.contains("b64_json") ||
+                !image["b64_json"].is_string() ||
+                image["b64_json"].get_ref<const std::string&>().empty() ||
+                !image.contains("generation_info"))
+                return "workflow result has invalid image media";
+        }
+        return nullptr;
+    }
+    return "unsupported native job kind";
+}
+} // namespace
+
 bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
                       AsyncJobCompletion&& completion) {
     // Caller holds manager.mutex; a successful completion/cancellation race is
@@ -431,11 +494,26 @@ bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
     if (job.status != AsyncJobStatus::Generating)
         return false;
 
-    // Materialize the fallback error before publishing any terminal status.
+    // Cancellation has priority over the result. Otherwise validate the
+    // exact native completion payload *before* publishing success. A malformed
+    // result must never produce a Completed job whose HTTP poll later throws.
+    const bool cancelled = job.cancel_requested.load();
+    const char* invalid_result = nullptr;
+    if (!cancelled && completion.success) {
+        try {
+            invalid_result = invalid_native_completion(job, completion);
+        } catch (...) {
+            invalid_result = "native completion validation threw";
+        }
+        if (invalid_result) {
+            completion.success = false;
+            completion.error_message = invalid_result;
+        }
+    }
     if (!completion.success && completion.error_message.empty())
         completion.error_message = "unknown generation error";
 
-    if (job.cancel_requested.load()) {
+    if (cancelled) {
         job.error_code = "cancelled";
         job.error_message = "job cancelled by client";
         clear_outputs(job);
@@ -452,7 +530,7 @@ bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
         job.error_message.clear();
         job.status = AsyncJobStatus::Completed;
     } else {
-        job.error_code = "generation_failed";
+        job.error_code = invalid_result ? "invalid_generation_result" : "generation_failed";
         job.error_message = std::move(completion.error_message);
         clear_outputs(job);
         job.status = AsyncJobStatus::Failed;

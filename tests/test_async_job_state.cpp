@@ -32,18 +32,38 @@ static std::shared_ptr<AsyncGenerationJob> enqueue(AsyncJobManager& manager,
         job->workflow.nodes[0].id = "first";
         job->workflow.nodes[1].id = "second";
         job->workflow_node_states = {"queued", "queued"};
+        job->workflow.outputs = {1};
     }
     manager.jobs.emplace(job->id, job);
     manager.queue.push_back(job->id);
     return job;
 }
 
-static AsyncJobCompletion successful_output() {
+static AsyncJobCompletion successful_output(AsyncJobKind kind = AsyncJobKind::Workflow) {
     AsyncJobCompletion output;
     output.success = true;
-    output.result_images_b64 = {"encoded"};
-    output.result_generation_info = json::array({json::object()});
-    output.result_workflow = {{"version", 1}};
+    if (kind == AsyncJobKind::ImgGen) {
+        output.result_images_b64 = {"encoded"};
+        output.result_generation_info = json::array({json::object()});
+    } else if (kind == AsyncJobKind::VidGen) {
+        output.result_media_b64 = "encoded";
+        output.result_media_mime_type = "video/webm";
+        output.result_fps = 16;
+        output.result_frame_count = 1;
+        output.result_generation_info = json::object();
+    } else {
+        output.result_workflow = {
+            {"version", 1},
+            {"model", json::object()},
+            {"outputs", json::array({
+                {{"node_id", "second"},
+                 {"images", json::array({
+                     {{"index", 0}, {"b64_json", "encoded"},
+                      {"generation_info", json::object()}}
+                 })}}
+            })}
+        };
+    }
     return output;
 }
 
@@ -185,6 +205,9 @@ spec("AsyncJobManager native terminal ownership and fault injection")
                 arrived.fetch_add(1);
                 while (arrived.load() < 2) std::this_thread::yield();
                 std::lock_guard<std::mutex> lock(manager.mutex);
+                // The real Workflow scheduler marks its nodes completed before
+                // publishing a success result. Race only against HTTP cancel.
+                job->workflow_node_states = {"completed", "completed"};
                 finish_async_job(manager, *job, successful_output());
             });
             cancel.join();
@@ -240,7 +263,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         {
             std::lock_guard<std::mutex> lock(manager.mutex);
             check_true(start_next_async_job(manager) == job);
-            check_true(finish_async_job(manager, *job, successful_output()));
+            check_true(finish_async_job(manager, *job, successful_output(AsyncJobKind::VidGen)));
             check_true(job->status == AsyncJobStatus::Completed);
         }
         // The caller's 202 body can never change to 'generating' or 'completed'.
@@ -454,7 +477,7 @@ spec("AsyncJobManager native terminal ownership and fault injection")
                 request.lora_map["private-lora"] = 1.0f;
                 request.extra_sample_args = "private-args";
                 check_true(start_next_async_job(manager) == job);
-                check_true(finish_async_job(manager, *job, successful_output()));
+                check_true(finish_async_job(manager, *job, successful_output(kind)));
                 check_true(job->status == AsyncJobStatus::Completed);
                 check_true(request.prompt.empty());
                 check_true(request.negative_prompt.empty());
@@ -536,6 +559,107 @@ spec("AsyncJobManager native terminal ownership and fault injection")
         }
         check_true(invalid);
         check_true(uninitialized.jobs.empty());
+    }
+
+    it("fails image completions with missing or mismatched metadata before terminal publication")
+    {
+        for (int malformed = 0; malformed < 3; ++malformed) {
+            TestAsyncJobManager manager;
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            auto job = enqueue(manager, AsyncJobKind::ImgGen);
+            check_true(start_next_async_job(manager) == job);
+            auto output = successful_output(AsyncJobKind::ImgGen);
+            if (malformed == 0)
+                output.result_generation_info = nullptr;
+            else if (malformed == 1)
+                output.result_generation_info = json::array();
+            else
+                output.result_images_b64 = {""};
+            check_true(finish_async_job(manager, *job, std::move(output)));
+            check_true(job->status == AsyncJobStatus::Failed);
+            check_true(job->result_images_b64.empty());
+            const json terminal = make_async_job_json(manager, *job);
+            check_true(terminal["result"].is_null());
+            check_equal(terminal["error"]["code"].get<std::string>(),
+                        std::string("invalid_generation_result"));
+        }
+    }
+
+    it("fails video completions missing media, fps, frames or metadata")
+    {
+        for (int malformed = 0; malformed < 5; ++malformed) {
+            TestAsyncJobManager manager;
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            auto job = enqueue(manager, AsyncJobKind::VidGen);
+            check_true(start_next_async_job(manager) == job);
+            auto output = successful_output(AsyncJobKind::VidGen);
+            if (malformed == 0)
+                output.result_media_b64.clear();
+            else if (malformed == 1)
+                output.result_media_mime_type.clear();
+            else if (malformed == 2)
+                output.result_fps = 0;
+            else if (malformed == 3)
+                output.result_frame_count = 0;
+            else
+                output.result_generation_info = nullptr;
+            check_true(finish_async_job(manager, *job, std::move(output)));
+            check_true(job->status == AsyncJobStatus::Failed);
+            check_true(job->result_media_b64.empty());
+            const json terminal = make_async_job_json(manager, *job);
+            check_true(terminal["result"].is_null());
+            check_equal(terminal["error"]["code"].get<std::string>(),
+                        std::string("invalid_generation_result"));
+        }
+    }
+
+    it("never publishes incomplete or unfinished Workflow V1 results as Completed")
+    {
+        for (int malformed = 0; malformed < 6; ++malformed) {
+            TestAsyncJobManager manager;
+            std::lock_guard<std::mutex> lock(manager.mutex);
+            auto job = enqueue(manager, AsyncJobKind::Workflow);
+            check_true(start_next_async_job(manager) == job);
+            job->workflow_node_states = {"completed", "completed"};
+            auto output = successful_output();
+            if (malformed == 0)
+                output.result_workflow = nullptr;
+            else if (malformed == 1)
+                output.result_workflow.erase("outputs");
+            else if (malformed == 2)
+                output.result_workflow["outputs"][0]["node_id"] = "other";
+            else if (malformed == 3)
+                output.result_workflow["outputs"][0]["images"] = json::array();
+            else if (malformed == 4)
+                output.result_workflow["outputs"][0]["images"][0]["b64_json"] = "";
+            else
+                job->workflow_node_states[1] = "running";
+            check_true(finish_async_job(manager, *job, std::move(output)));
+            check_true(job->status == AsyncJobStatus::Failed);
+            check_equal(job->workflow_node_states[1], std::string(
+                malformed == 5 ? "failed" : "completed"));
+            const json terminal = make_async_terminal_job_json(*job);
+            check_true(terminal["result"].is_null());
+            check_equal(terminal["error"]["code"].get<std::string>(),
+                        std::string("invalid_generation_result"));
+        }
+    }
+
+    it("lets cancellation take priority over even an incomplete native result")
+    {
+        TestAsyncJobManager manager;
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        auto job = enqueue(manager, AsyncJobKind::ImgGen);
+        check_true(start_next_async_job(manager) == job);
+        job->cancel_requested.store(true);
+        AsyncJobCompletion output;
+        output.success = true;
+        check_true(finish_async_job(manager, *job, std::move(output)));
+        check_true(job->status == AsyncJobStatus::Cancelled);
+        const json terminal = make_async_terminal_job_json(*job);
+        check_true(terminal["result"].is_null());
+        check_equal(terminal["error"]["code"].get<std::string>(),
+                    std::string("cancelled"));
     }
 
 }

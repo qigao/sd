@@ -166,6 +166,16 @@ exactly-once/跨重启恢复依然不能保证。不得自动重发推理请求�
 
 生产队列、状态发布、取消/成功的原子仲裁、过期清理与 shutdown 取消
 已抽离为 `sd_app_async_state`，由同一个生产 worker 和 CTest 使用。
+
+生产终态提交点现在对三类成功载荷做**结构完整性门禁**：图片必须拥有
+数量一一对应的编码媒体与元数据；视频必须提供非空媒体/MIME、正数
+fps/帧数和元数据；Workflow 必须包含 V1 标识、模型对象、与声明输出
+节点对应的单图媒体，且所有节点先到达 completed 状态。
+缺少任何字段、输出个数不匹配或含空媒体时，不发布 `completed`，
+而以 `invalid_generation_result` 失败终态明确回收部分结果。
+这防止客户端查询完成结果时才因 `generation_info.at(i)` 越界而报 500。
+取消与成功竞争仍以 manager.mutex 下先提交的结果为准，取消优先清理媒体。
+新增 CTest 直接注入不完整图像/视频/Workflow 成功回执，不创建第二推理 Provider。
 `test_sd_app_async_state` 向**生产终态提交点**注入成功、失败与并发取消结果，
 验证终态只可提交一次、部分媒体不发布、预览与输入资源退休，以及 tombstone TTL。
 这不是第二套模型计算代码、不是模拟生成 Provider，也不等于真实后端错误注入。
