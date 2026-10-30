@@ -38,7 +38,8 @@ POST /sdcpp/v1/jobs/{id}/cancel 取消。
 ```json
 {
   "version": 1,
-  "model": {"recipe": "@command-line", "revision": 0,\n            "instance": "0123456789abcdef0123456789abcdef"},
+  "model": {"recipe": "@command-line", "revision": 0,
+            "instance": "0123456789abcdef0123456789abcdef"},
   "nodes": [
     {
       "id": "draft",
@@ -62,7 +63,7 @@ POST /sdcpp/v1/jobs/{id}/cancel 取消。
 
 所有 JSON object 的字段集合是封闭的，未知字段、错误类型、缺少必需字段、
 重复节点/依赖/输出、缺失依赖、环以及不支持的 node type 均返回 400。
-version 严格为整数 1；model.recipe、model.revision、model.instance 必填，instance 是 1–64 位小写十六进制串。
+version 严格为整数 1；model.recipe、model.revision、model.instance 必填，instance 必须是本次服务返回的 32 位小写十六进制值。
 节点 ID 为 1–48 字节 ASCII 标识符，首字符必须是英文字母。
 
 V1 只支持 **sdcpp.image.generate**：单张 PNG text-to-image。每节点
@@ -142,3 +143,5 @@ CI 不下载权重。今后真实模型资格测试需独立记录完整权重 i
 
 后续扩展需要引入**显式 version/type、具名端口及拥有型媒体引用**；保持 sd.cpp
 模型计算权属，KFCore 只作为真实存在、独立验收的可选 node backend。
+
+上述 JSON 示例由原生 CTest 直接解析并经 Workflow V1 解析器验证，不能只检查 Markdown 格式。

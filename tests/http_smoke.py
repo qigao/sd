@@ -173,6 +173,9 @@ def exercise_server(executable):
                 code, status = request_json(port, "POST", "/sdcpp/v1/models/unload", {})
                 require(code == 200 and status.get("state") == "empty",
                         "unloading an empty context must preserve the empty state")
+                if executable.name.startswith("sd-app-server"):
+                    require(status.get("instance") == instance,
+                            "unloading must not change the current process identity")
                 require(process.poll() is None, executable.name + " stopped while serving requests")
                 print("Native HTTP catalog, empty-context capabilities, external UI reload and error paths passed.")
             except Exception:
@@ -188,6 +191,45 @@ def exercise_server(executable):
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=3)
+
+            # A separate native process must not inherit the old process's
+            # model session identity, even with the same model directory and
+            # no loaded weights. Do not impose this owned extension on upstream.
+            if executable.name.startswith("sd-app-server"):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    restart_port = reservation.getsockname()[1]
+                restarted = subprocess.Popen(
+                    [str(executable), "--listen-ip", "127.0.0.1",
+                     "--listen-port", str(restart_port),
+                     "--model-dir", str(model_directory)],
+                    cwd=executable.parent, stdin=subprocess.DEVNULL,
+                    stdout=log, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 15
+                    while True:
+                        require(restarted.poll() is None, "restarted native server exited")
+                        try:
+                            code, fresh = request_json(
+                                restart_port, "GET", "/sdcpp/v1/models/status")
+                            break
+                        except (OSError, http.client.HTTPException):
+                            require(time.monotonic() < deadline,
+                                    "restarted native server readiness deadline expired")
+                            time.sleep(0.05)
+                    require(code == 200 and fresh.get("state") == "empty",
+                            "restarted native server must have an empty model context")
+                    require(isinstance(fresh.get("instance"), str) and
+                            len(fresh["instance"]) == 32 and fresh["instance"] != instance,
+                            "a restarted native server must mint a distinct model instance")
+                finally:
+                    if restarted.poll() is None:
+                        restarted.terminate()
+                        try:
+                            restarted.wait(timeout=3)
+                        except subprocess.TimeoutExpired:
+                            restarted.kill()
+                            restarted.wait(timeout=3)
 
 
 if __name__ == "__main__":

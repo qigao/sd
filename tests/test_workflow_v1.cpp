@@ -2,6 +2,8 @@
 #include "tinytest.hpp"
 
 #include <atomic>
+#include <fstream>
+#include <iterator>
 #include <string>
 #include <stdexcept>
 #include <vector>
@@ -73,6 +75,9 @@ spec("JSON Workflow V1 native validation and scheduler")
         check_false(parse_workflow_v1(doc, graph, error));
         doc = sample();
         doc["model"]["instance"] = "NON_HEX";
+        check_false(parse_workflow_v1(doc, graph, error));
+        doc = sample();
+        doc["model"]["instance"] = "0";
         check_false(parse_workflow_v1(doc, graph, error));
         doc = sample();
         doc["model"]["instance"] = json::object();
@@ -182,4 +187,32 @@ spec("JSON Workflow V1 native validation and scheduler")
         check_true(outcome == WorkflowV1Outcome::Failed);
         check_equal(error, std::string("injected exception"));
     }
+    it("keeps the documented V1 JSON executable and schema-valid")
+    {
+        // The human-facing example must remain a real V1 request, not an
+        // illustrative pseudo-JSON snippet. No model is loaded in this test.
+        std::ifstream stream(SD_APP_WORKFLOW_DOC_PATH, std::ios::binary);
+        check_true(stream.good());
+        if (stream.good()) {
+            const std::string markdown((std::istreambuf_iterator<char>(stream)),
+                                       std::istreambuf_iterator<char>());
+            const std::string open = "```json\n";
+            const size_t begin = markdown.find(open);
+            check_true(begin != std::string::npos);
+            if (begin != std::string::npos) {
+                const size_t body_start = begin + open.size();
+                const size_t body_end = markdown.find("```", body_start);
+                check_true(body_end != std::string::npos);
+                if (body_end != std::string::npos) {
+                    const auto document = json::parse(markdown.substr(body_start, body_end - body_start));
+                    WorkflowV1 plan;
+                    std::string error;
+                    check_true(parse_workflow_v1(document, plan, error));
+                    check_equal(plan.nodes.size(), static_cast<size_t>(2));
+                    check_equal(plan.outputs.size(), static_cast<size_t>(2));
+                }
+            }
+        }
+    }
+
 }

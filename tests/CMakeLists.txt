@@ -63,6 +63,8 @@ endforeach()
 if(TARGET sd_app_workflow_v1)
   add_executable(test_sd_app_workflow_v1 test_workflow_v1.cpp)
   target_link_libraries(test_sd_app_workflow_v1 PRIVATE sd_app_workflow_v1 sd_app_test_tinytest)
+  target_compile_definitions(test_sd_app_workflow_v1 PRIVATE
+    "SD_APP_WORKFLOW_DOC_PATH=\"${PROJECT_SOURCE_DIR}/docs/workflow-v1.md\"")
   add_test(NAME test_sd_app_workflow_v1 COMMAND test_sd_app_workflow_v1)
   set_tests_properties(test_sd_app_workflow_v1 PROPERTIES
     LABELS "workflow;no-weights" TIMEOUT 60
