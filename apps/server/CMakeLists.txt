@@ -2,6 +2,10 @@ add_library(sd_app_workflow_v1 STATIC workflow_v1.cpp)
 target_link_libraries(sd_app_workflow_v1 PUBLIC sd_app_common)
 target_include_directories(sd_app_workflow_v1 PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 
+add_library(sd_app_async_state STATIC async_job_state.cpp)
+target_link_libraries(sd_app_async_state PUBLIC sd_app_common)
+target_include_directories(sd_app_async_state PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
 add_executable(sd-app-server
   main.cpp
   runtime.cpp
@@ -14,7 +18,7 @@ add_executable(sd-app-server
   routes_sdcpp.cpp
   routes_workflows.cpp
   workflow_execution.cpp)
-target_link_libraries(sd-app-server PRIVATE sd_app_common sd_app_workflow_v1)
+target_link_libraries(sd-app-server PRIVATE sd_app_common sd_app_workflow_v1 sd_app_async_state)
 
 # Keep upstream's model catalog as the single builtin recipe source. Local
 # recipe extensions already use the service's model-root/recipes directory.

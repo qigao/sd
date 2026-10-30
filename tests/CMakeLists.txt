@@ -91,3 +91,15 @@ if(TARGET sd-app-server)
       WORKING_DIRECTORY "$<TARGET_FILE_DIR:sd-app-server>")
   endif()
 endif()
+
+# A native ownership/terminal-state test exercising exactly the state machine
+# called by the real sd.cpp worker. No mock provider or weights are required.
+if(TARGET sd_app_async_state)
+  add_executable(test_sd_app_async_state test_async_job_state.cpp)
+  target_link_libraries(test_sd_app_async_state PRIVATE
+    sd_app_async_state sd_app_test_tinytest)
+  add_test(NAME test_sd_app_async_state COMMAND test_sd_app_async_state)
+  set_tests_properties(test_sd_app_async_state PROPERTIES
+    LABELS "workflow;native-owner;fault-injection;no-weights" TIMEOUT 60
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:test_sd_app_async_state>")
+endif()

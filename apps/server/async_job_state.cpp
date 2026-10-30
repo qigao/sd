@@ -1,0 +1,325 @@
+// Async job status/queue ownership, independent of model execution.
+#include "async_jobs.h"
+
+#include <algorithm>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
+
+int64_t unix_timestamp_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+const char* async_job_kind_name(AsyncJobKind kind) {
+    switch (kind) {
+        case AsyncJobKind::ImgGen:
+            return "img_gen";
+        case AsyncJobKind::VidGen:
+            return "vid_gen";
+        case AsyncJobKind::Workflow:
+            return "workflow";
+        default:
+            return "img_gen";
+    }
+}
+
+const char* async_job_status_name(AsyncJobStatus status) {
+    switch (status) {
+        case AsyncJobStatus::Queued:
+            return "queued";
+        case AsyncJobStatus::Generating:
+            return "generating";
+        case AsyncJobStatus::Completed:
+            return "completed";
+        case AsyncJobStatus::Failed:
+            return "failed";
+        case AsyncJobStatus::Cancelled:
+            return "cancelled";
+        default:
+            return "failed";
+    }
+}
+
+void purge_expired_jobs(AsyncJobManager& manager) {
+    const int64_t now = unix_timestamp_now_ms();
+
+    for (auto it = manager.expired_jobs.begin(); it != manager.expired_jobs.end();) {
+        if (it->second <= now) {
+            it = manager.expired_jobs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (auto it = manager.jobs.begin(); it != manager.jobs.end();) {
+        const auto& job = it->second;
+        if (job->completed_at == 0) {
+            ++it;
+            continue;
+        }
+
+        int64_t ttl_seconds = job->status == AsyncJobStatus::Completed
+                                  ? manager.completed_ttl_seconds
+                                  : manager.failed_ttl_seconds;
+        if (now - job->completed_at >= ttl_seconds * 1000) {
+            manager.expired_jobs[job->id] = now + std::max<int64_t>(ttl_seconds, 60) * 1000;
+            it                            = manager.jobs.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+size_t count_pending_jobs(const AsyncJobManager& manager) {
+    size_t pending = 0;
+    for (const auto& entry : manager.jobs) {
+        if (entry.second->status == AsyncJobStatus::Queued ||
+            entry.second->status == AsyncJobStatus::Generating) {
+            ++pending;
+        }
+    }
+    return pending;
+}
+
+std::string make_async_job_id(AsyncJobManager& manager) {
+    std::ostringstream oss;
+    oss << "job_" << std::hex << unix_timestamp_now_ms() << "_" << std::setw(8)
+        << std::setfill('0') << manager.next_id++;
+    return oss.str();
+}
+
+namespace { void release_generation_inputs(AsyncGenerationJob& job); }
+
+bool cancel_queued_job(AsyncJobManager& manager, AsyncGenerationJob& job) {
+    auto new_end = std::remove(manager.queue.begin(), manager.queue.end(), job.id);
+    if (new_end == manager.queue.end()) {
+        return false;
+    }
+
+    manager.queue.erase(new_end, manager.queue.end());
+    job.cancel_requested.store(true);
+    job.status       = AsyncJobStatus::Cancelled;
+    job.completed_at = unix_timestamp_now_ms();
+    job.result_images_b64.clear();
+    job.result_generation_info = nullptr;
+    job.result_media_b64.clear();
+    job.result_media_mime_type.clear();
+    job.result_frame_count = 0;
+    job.result_fps         = 0;
+    job.error_code         = "cancelled";
+    job.error_message      = "job cancelled by client";
+    job.result_workflow = nullptr;
+    for (auto& state : job.workflow_node_states) state = "skipped";
+    {
+        std::lock_guard<std::mutex> preview_lock(job.preview_mutex);
+        job.preview_b64.clear();
+    }
+    release_generation_inputs(job);
+    return true;
+}
+
+json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJob& job) {
+    json result;
+    result["id"]               = job.id;
+    result["kind"]             = async_job_kind_name(job.kind);
+    result["status"]           = async_job_status_name(job.status);
+    result["cancel_requested"] = job.cancel_requested.load();
+    result["created"]          = job.created_at;
+    result["started"]          = job.started_at == 0 ? json(nullptr) : json(job.started_at);
+    result["completed"]        = job.completed_at == 0 ? json(nullptr) : json(job.completed_at);
+    result["queue_position"]   = 0;
+
+    if (job.status == AsyncJobStatus::Queued) {
+        size_t position = 1;
+        for (const auto& queued_id : manager.queue) {
+            if (queued_id == job.id) {
+                result["queue_position"] = position;
+                break;
+            }
+            ++position;
+        }
+    }
+
+    if (job.kind == AsyncJobKind::Workflow) {
+        result["nodes"] = json::array();
+        for (size_t i = 0; i < job.workflow.nodes.size(); ++i) {
+            result["nodes"].push_back({{"id", job.workflow.nodes[i].id},
+                                       {"status", job.workflow_node_states[i]}});
+        }
+    }
+    if (job.status == AsyncJobStatus::Completed) {
+        if (job.kind == AsyncJobKind::Workflow) {
+            result["result"] = job.result_workflow;
+        } else if (job.kind == AsyncJobKind::VidGen) {
+            result["result"] = {
+                {"output_format", job.vid_gen.output_format},
+                {"mime_type", job.result_media_mime_type},
+                {"fps", job.result_fps},
+                {"frame_count", job.result_frame_count},
+                {"b64_json", job.result_media_b64},
+                {"generation_info", job.result_generation_info},
+            };
+        } else {
+            json images = json::array();
+            for (size_t i = 0; i < job.result_images_b64.size(); ++i) {
+                images.push_back({{"index", i}, {"b64_json", job.result_images_b64[i]}, {"generation_info", job.result_generation_info.at(i)}});
+            }
+            result["result"] = {
+                {"output_format", job.img_gen.output_format},
+                {"images", images},
+            };
+        }
+        result["error"] = nullptr;
+    } else if (job.status == AsyncJobStatus::Failed ||
+               job.status == AsyncJobStatus::Cancelled) {
+        result["result"] = nullptr;
+        result["error"]  = {
+            {"code",
+             job.error_code.empty()
+                 ? (job.status == AsyncJobStatus::Cancelled ? "cancelled" : "generation_failed")
+                 : job.error_code},
+            {"message", job.error_message},
+        };
+    } else {
+        result["result"] = nullptr;
+        result["error"]  = nullptr;
+    }
+
+    if (job.status == AsyncJobStatus::Generating) {
+        std::lock_guard<std::mutex> lock(job.preview_mutex);
+        if (!job.preview_b64.empty()) {
+            result["preview"] = {
+                {"pass", job.preview_pass},
+                {"step", job.preview_step},
+                {"total_steps", job.preview_total_steps},
+                {"b64_json", job.preview_b64},
+            };
+        }
+    }
+
+    return result;
+}
+
+
+
+std::shared_ptr<AsyncGenerationJob> start_next_async_job(AsyncJobManager& manager) {
+    // Caller holds manager.mutex. The queue and job status share one owner.
+    while (!manager.queue.empty()) {
+        const std::string id = std::move(manager.queue.front());
+        manager.queue.pop_front();
+        auto it = manager.jobs.find(id);
+        if (it == manager.jobs.end() || it->second->status != AsyncJobStatus::Queued)
+            continue;
+        auto job = it->second;
+        job->status = AsyncJobStatus::Generating;
+        job->started_at = unix_timestamp_now_ms();
+        return job;
+    }
+    return {};
+}
+
+namespace {
+void release_generation_inputs(AsyncGenerationJob& job) {
+    // Do not retain decoded input pixels or source media for the result TTL.
+    // Only the small output_format is needed for completed job serialization.
+    if (job.kind == AsyncJobKind::ImgGen) {
+        ImgGenJobRequest empty;
+        empty.output_format = std::move(job.img_gen.output_format);
+        job.img_gen = std::move(empty);
+    } else if (job.kind == AsyncJobKind::VidGen) {
+        VidGenJobRequest empty;
+        empty.output_format = std::move(job.vid_gen.output_format);
+        job.vid_gen = std::move(empty);
+    } else if (job.kind == AsyncJobKind::Workflow) {
+        job.img_gen = ImgGenJobRequest{};
+    }
+}
+
+void clear_outputs(AsyncGenerationJob& job) {
+    job.result_images_b64.clear();
+    job.result_generation_info = nullptr;
+    job.result_media_b64.clear();
+    job.result_media_mime_type.clear();
+    job.result_frame_count = 0;
+    job.result_fps = 0;
+    job.result_workflow = nullptr;
+}
+} // namespace
+
+bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
+                      AsyncJobCompletion&& completion) {
+    // Caller holds manager.mutex; a successful completion/cancellation race is
+    // ordered against the HTTP cancel route by the same lock. No later write is
+    // permitted once a terminal status has been published.
+    (void)manager;
+    if (job.status != AsyncJobStatus::Generating)
+        return false;
+
+    // Materialize the fallback error before publishing any terminal status.
+    if (!completion.success && completion.error_message.empty())
+        completion.error_message = "unknown generation error";
+
+    if (job.cancel_requested.load()) {
+        job.error_code = "cancelled";
+        job.error_message = "job cancelled by client";
+        clear_outputs(job);
+        job.status = AsyncJobStatus::Cancelled;
+    } else if (completion.success) {
+        job.result_images_b64 = std::move(completion.result_images_b64);
+        job.result_generation_info = std::move(completion.result_generation_info);
+        job.result_media_b64 = std::move(completion.result_media_b64);
+        job.result_media_mime_type = std::move(completion.result_media_mime_type);
+        job.result_frame_count = completion.result_frame_count;
+        job.result_fps = completion.result_fps;
+        job.result_workflow = std::move(completion.result_workflow);
+        job.error_code.clear();
+        job.error_message.clear();
+        job.status = AsyncJobStatus::Completed;
+    } else {
+        job.error_code = "generation_failed";
+        job.error_message = std::move(completion.error_message);
+        clear_outputs(job);
+        job.status = AsyncJobStatus::Failed;
+    }
+    if (job.kind == AsyncJobKind::Workflow && job.status != AsyncJobStatus::Completed) {
+        for (auto& state : job.workflow_node_states) {
+            if (state == "running")
+                state = job.status == AsyncJobStatus::Cancelled ? "cancelled" : "failed";
+            else if (state == "queued")
+                state = "skipped";
+        }
+    }
+    // Callback owner and generation monitor are already unwound when the
+    // worker reaches this function. Preview is never needed in a terminal job.
+    {
+        std::lock_guard<std::mutex> preview_lock(job.preview_mutex);
+        job.preview_b64.clear();
+    }
+    release_generation_inputs(job);
+    job.completed_at = unix_timestamp_now_ms();
+    return true;
+}
+
+void stop_async_job_worker(AsyncJobManager& manager) {
+    {
+        std::lock_guard<std::mutex> lock(manager.mutex);
+        manager.stop = true;
+        // The worker must not drain newly orphaned generations during shutdown.
+        // A running callback/ctx stays alive until the worker has been joined.
+        while (!manager.queue.empty()) {
+            const auto it = manager.jobs.find(manager.queue.front());
+            if (it != manager.jobs.end() && it->second->status == AsyncJobStatus::Queued)
+                cancel_queued_job(manager, *it->second);
+            else
+                manager.queue.pop_front();
+        }
+        for (const auto& entry : manager.jobs) {
+            if (entry.second->status == AsyncJobStatus::Generating)
+                entry.second->cancel_requested.store(true);
+        }
+    }
+    manager.cv.notify_all();
+}
+

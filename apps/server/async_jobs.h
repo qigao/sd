@@ -72,10 +72,29 @@ struct AsyncJobManager {
     int64_t failed_ttl_seconds    = 600;
 };
 
+// Owned result payload, prepared outside the manager lock by the one native
+// worker. Tests may submit deterministic completion/failure payloads directly
+// to the *same* terminal state machine; no fake inference backend is installed.
+struct AsyncJobCompletion {
+    bool success = false;
+    std::vector<std::string> result_images_b64;
+    json result_generation_info;
+    std::string result_media_b64;
+    std::string result_media_mime_type;
+    int result_frame_count = 0;
+    int result_fps = 0;
+    json result_workflow;
+    std::string error_message;
+};
+
 void purge_expired_jobs(AsyncJobManager& manager);
 size_t count_pending_jobs(const AsyncJobManager& manager);
 std::string make_async_job_id(AsyncJobManager& manager);
 bool cancel_queued_job(AsyncJobManager& manager, AsyncGenerationJob& job);
+// These functions require manager.mutex to be held by the caller.
+std::shared_ptr<AsyncGenerationJob> start_next_async_job(AsyncJobManager& manager);
+bool finish_async_job(AsyncJobManager& manager, AsyncGenerationJob& job,
+                      AsyncJobCompletion&& completion);
 json make_async_job_json(const AsyncJobManager& manager, const AsyncGenerationJob& job);
 bool execute_img_gen_job(ServerRuntime& runtime,
                          AsyncGenerationJob& job,

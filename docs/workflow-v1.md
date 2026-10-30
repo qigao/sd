@@ -105,6 +105,15 @@ RAII 清理才写 cancelled；中断不强行释放仍被 native 代码借用的
 节点异常形成 failed，不跳过关闭保护。没有模型时合法提案返回 503；
 不匹配的 recipe/revision/instance 返回 409；不支持 generation mode 或继承了 V1 不允许的默认参数返回 422。
 
+## Native Job Owner 终态验收
+
+生产队列、状态发布、取消/成功的原子仲裁、过期清理与 shutdown 取消
+已抽离为 `sd_app_async_state`，由同一个生产 worker 和 CTest 使用。
+`test_sd_app_async_state` 向**生产终态提交点**注入成功、失败与并发取消结果，
+验证终态只可提交一次、部分媒体不发布、预览与输入资源退休，以及 tombstone TTL。
+这不是第二套模型计算代码、不是模拟生成 Provider，也不等于真实后端错误注入。
+真实模型权重执行时的计算失败、异常、显存故障与资源清理仍是 Issue #2 的独立门禁。
+
 ## 验证层次
 
 | 验证 | 证据定义 | 不可推论 |
